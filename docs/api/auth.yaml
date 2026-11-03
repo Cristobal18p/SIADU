@@ -1,0 +1,335 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Autenticación y Sesión
+  description: |
+    Autenticación de usuarios universitarios mediante JWT (HS256) emitido por Express con Prisma.
+    Permite acceso tanto con cédula como con correo institucional `@up.ac.pa`.
+    Todos los payloads utilizan estrictamente la convención **`camelCase`**.
+
+    **Cambio de contraseña en el primer acceso:** las cuentas nacen con una contraseña inicial y
+    `debeCambiarPassword: true`. Mientras sea `true`, el usuario solo puede usar `GET /api/auth/me`,
+    `POST /api/auth/password` y `POST /api/auth/logout`; cualquier otro endpoint responde `403` con
+    `CAMBIO_PASSWORD_REQUERIDO`. El servidor lee el indicador de la base de datos (no del token) y guarda el estado de cada cuenta unos segundos en memoria
+    (10 s por defecto, `ACCOUNT_CACHE_SECONDS`) para no consultarla en cada petición: una cuenta desactivada deja de funcionar
+    a más tardar al vencer esa caché,
+    así que al cambiar la contraseña el mismo token queda habilitado sin volver a iniciar sesión.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Auth
+    description: Inicio de sesión, perfil del usuario y control de sesión
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Iniciar sesión institucional
+      description: |
+        Valida las credenciales institucionales contra la base de datos (con hash `bcrypt`).
+        Actualiza de forma auditada el campo `ultimo_acceso` en la tabla `usuarios`.
+        `debeCambiarPassword` se lee de `usuarios.clave_inicial`.
+
+        **Cuenta y perfil activos:** el acceso exige `usuarios.estado = A` y que el usuario pertenezca al `estamento`
+        elegido con su perfil activo (la persona y su registro de estudiante, profesor o administrativo con estado `A`).
+        Una cuenta sin perfil en ese estamento, o con la persona inactiva, recibe `401` `CREDENCIALES_INVALIDAS`.
+        Si `usuario.debeCambiarPassword` es `true`, el cliente muestra la pantalla de cambio de contraseña antes
+        de cualquier otra.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identificador, password, estamento]
+              properties:
+                identificador:
+                  type: string
+                  description: Cédula personal o correo institucional
+                  example: "9-000-0001"
+                password:
+                  type: string
+                  format: password
+                  description: Contraseña del usuario
+                  example: "Demo2026*"
+                estamento:
+                  description: Estamento institucional seleccionado en el selector de acceso
+                  allOf:
+                    - $ref: "./common.yaml#/components/schemas/Estamento"
+                  example: "ESTUDIANTE"
+      responses:
+        "200":
+          description: Autenticación exitosa. Retorna token JWT y perfil básico.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, usuario]
+                properties:
+                  token:
+                    type: string
+                    description: |
+                      JWT HS256 firmado con `JWT_SECRET`. Su vida es configurable con la variable `EXPIRESIN`
+                      (nunca menos de 2 horas); si no se define, dura 8 horas. No hay renovación: al vencer,
+                      cualquier endpoint responde `401` y el cliente cierra la sesión.
+                    example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  usuario:
+                    type: object
+                    required: [idUsuario, correo, cedula, nombreCompleto, roles, estamentos, debeCambiarPassword]
+                    properties:
+                      idUsuario:
+                        type: integer
+                        example: 1
+                      correo:
+                        type: string
+                        format: email
+                        example: "alex.demo@up.ac.pa"
+                      cedula:
+                        type: string
+                        description: Cédula del usuario (obligatoria)
+                        example: "9-000-0001"
+                      nombreCompleto:
+                        type: string
+                        example: "Alex Demo"
+                      roles:
+                        type: array
+                        description: Privilegios de sistema para navegación y guardas de rutas
+                        items:
+                          $ref: "./common.yaml#/components/schemas/RolSistema"
+                        example: ["SOLICITANTE"]
+                      estamentos:
+                        type: array
+                        description: Estamentos a los que pertenece el usuario
+                        items:
+                          $ref: "./common.yaml#/components/schemas/Estamento"
+                        example: ["ESTUDIANTE"]
+                      codUnidad:
+                        type: integer
+                        description: Código de la unidad académica a la que pertenece el usuario
+                        example: 24
+                      debeCambiarPassword:
+                        type: boolean
+                        description: "`true` mientras la cuenta tenga la contraseña inicial: debe cambiarla antes de usar el sistema"
+                        example: false
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          description: Credenciales no válidas o acceso no autorizado para el portal seleccionado
+          content:
+            application/json:
+              schema:
+                $ref: "./common.yaml#/components/schemas/Error"
+              example:
+                error:
+                  codigo: CREDENCIALES_INVALIDAS
+                  mensaje: "Credenciales de acceso incorrectas o cuenta no autorizada."
+        "429":
+          description: |
+            Demasiados intentos fallidos. Tras 8 intentos fallidos de la misma cuenta desde la misma IP (o 100 desde
+            una IP) en 15 minutos, el servidor rechaza los siguientes. La respuesta trae `Retry-After` (segundos).
+          headers:
+            Retry-After:
+              description: Segundos que debe esperar el cliente antes de volver a intentar
+              schema: { type: integer, example: 600 }
+          content:
+            application/json:
+              schema:
+                $ref: "./common.yaml#/components/schemas/Error"
+              example:
+                error:
+                  codigo: DEMASIADOS_INTENTOS
+                  mensaje: "Demasiados intentos fallidos. Espere unos minutos e intente de nuevo."
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Cerrar sesión
+      description: |
+        Cierra **todas** las sesiones del usuario: el servidor incrementa su `version_sesion` y cualquier token
+        emitido antes (en este u otro dispositivo) responde `401` `NO_AUTENTICADO` desde ese momento. El cliente
+        siempre descarta el token localmente.
+
+        **Cómo se revoca:** el token lleva el claim `vs` (versión de sesión). En cada petición el servidor lo
+        compara con `usuarios.version_sesion`; si no coincide, el token ya no vale. Un token sin `vs` cuenta como 0.
+      x-roles: [SOLICITANTE, APROBADOR, ADMINISTRADOR]
+      responses:
+        "200":
+          description: Sesión cerrada
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mensaje]
+                properties:
+                  ok:      { type: boolean, example: true }
+                  mensaje: { type: string, example: "Sesión finalizada exitosamente." }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+
+  /api/auth/password:
+    post:
+      tags: [Auth]
+      operationId: changePassword
+      summary: Cambiar la contraseña del usuario en sesión
+      description: |
+        Cambia la contraseña del usuario autenticado. Es obligatorio en el primer acceso
+        (`debeCambiarPassword: true`) y al terminar el indicador queda en `false`.
+
+        **Política de la contraseña nueva:** de 8 a 64 caracteres, con al menos una mayúscula, una minúscula,
+        un número y un símbolo, y distinta de la actual. Se guarda con hash `bcrypt`.
+
+        Errores de validación (`400`):
+        - `PASSWORD_ACTUAL_INCORRECTA`: la contraseña actual no coincide (`detalles[].campo = passwordActual`).
+          No se usa `401` para no cerrar la sesión del cliente.
+        - `VALIDACION_FALLIDA`: la nueva no cumple la política (`detalles[].campo = passwordNueva`).
+      x-roles: [SOLICITANTE, APROBADOR, ADMINISTRADOR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [passwordActual, passwordNueva]
+              properties:
+                passwordActual:
+                  type: string
+                  format: password
+                  description: Contraseña vigente (la inicial, en el primer acceso)
+                  example: "Demo2026*"
+                passwordNueva:
+                  type: string
+                  format: password
+                  minLength: 8
+                  maxLength: 64
+                  example: "Fiec#2026seguro"
+      responses:
+        "200":
+          description: |
+            Contraseña cambiada; `debeCambiarPassword` queda en `false`. Las demás sesiones del usuario quedan
+            revocadas y la respuesta trae un `token` nuevo para esta: el cliente debe guardarlo en lugar del anterior.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mensaje, token]
+                properties:
+                  ok:      { type: boolean, example: true }
+                  mensaje: { type: string, example: "Contraseña actualizada correctamente." }
+                  token:   { type: string, description: "JWT nuevo de esta sesión", example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." }
+        "400":
+          description: La contraseña actual no coincide o la nueva no cumple la política
+          content:
+            application/json:
+              schema:
+                $ref: "./common.yaml#/components/schemas/Error"
+              example:
+                error:
+                  codigo: PASSWORD_ACTUAL_INCORRECTA
+                  mensaje: "La contraseña actual no es correcta."
+                  detalles:
+                    - campo: passwordActual
+                      mensaje: "La contraseña actual no es correcta."
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Obtener perfil completo del usuario autenticado
+      description: |
+        Devuelve el contexto completo del usuario: datos de contacto, unidad académica,
+        carrera (estudiante) y cargos vigentes (administrativo/autoridad). Los profesores se identifican por su unidad:
+        la base no registra departamentos de profesores.
+        Todo usuario activo incluye el rol `SOLICITANTE` en `roles`, además de `APROBADOR` o `ADMINISTRADOR` si los tiene.
+      x-roles: [SOLICITANTE, APROBADOR, ADMINISTRADOR]
+      responses:
+        "200":
+          description: Perfil detallado del usuario en sesión
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idUsuario, correo, cedula, nombreCompleto, nombre, apellido, ultimoAcceso, roles, estamentos, unidad, debeCambiarPassword]
+                properties:
+                  idUsuario:
+                    type: integer
+                    example: 1
+                  correo:
+                    type: string
+                    format: email
+                    example: "alex.demo@up.ac.pa"
+                  cedula:
+                    type: string
+                    description: Cédula del usuario (obligatoria)
+                    example: "9-000-0001"
+                  nombre:
+                    type: string
+                    example: "Alex"
+                  apellido:
+                    type: string
+                    example: "Demo"
+                  nombreCompleto:
+                    type: string
+                    description: Nombre y apellido tal como se muestran en la interfaz
+                    example: "Alex Demo"
+                  ultimoAcceso:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: |
+                      Fecha del inicio de sesión anterior al actual; `null` en el primer acceso.
+                      El campo siempre está presente. Su valor no cambia mientras dure la sesión
+                      (hasta el siguiente login), aunque `/auth/me` se consulte varias veces.
+                    example: "2026-10-05T16:30:00Z"
+                  debeCambiarPassword:
+                    type: boolean
+                    description: |
+                      `true` mientras la cuenta tenga la contraseña inicial. El cliente muestra la pantalla de cambio
+                      de contraseña y no deja usar el resto del sistema hasta cambiarla (`POST /api/auth/password`).
+                    example: false
+                  roles:
+                    type: array
+                    items:
+                      $ref: "./common.yaml#/components/schemas/RolSistema"
+                    example: ["SOLICITANTE"]
+                  estamentos:
+                    type: array
+                    items:
+                      $ref: "./common.yaml#/components/schemas/Estamento"
+                    example: ["ESTUDIANTE"]
+                  unidad:
+                    description: Unidad académica a la que pertenece el usuario (estudiante, profesor o administrativo); siempre presente
+                    allOf:
+                      - $ref: "./common.yaml#/components/schemas/UnidadResumen"
+                  carrera:
+                    type: object
+                    nullable: true
+                    description: Presente para estudiantes; `null` en los demás
+                    allOf:
+                      - $ref: "./common.yaml#/components/schemas/CarreraResumen"
+                  cargos:
+                    type: array
+                    description: |
+                      Cargos y asignaciones administrativas vigentes del usuario, del cargo mayor al menor. En cada uno, `titularActual` es el propio
+                      usuario, `idUsuarioTitular` su `idUsuario` y `esAprobador` indica si tiene el rol `APROBADOR`.
+                    items:
+                      $ref: "./common.yaml#/components/schemas/CargoResumen"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

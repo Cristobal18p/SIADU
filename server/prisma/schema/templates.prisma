@@ -1,0 +1,71 @@
+model Flujo {
+  idFlujo             BigInt       @id @default(autoincrement()) @map("id_flujo")
+  nombre              String       @db.VarChar(150)
+  descripcion         String?      @db.Text
+  codigo              String       @unique @db.VarChar(50)
+  codUnidad           Int          @map("cod_unidad")
+  estado              String       @default("B") @db.Char(1)
+  idVersionBorrador   BigInt?      @map("id_version_borrador")
+  fechaCreada         DateTime     @default(now()) @map("fecha_creada") @db.Timestamptz
+
+  unidad              Unidad       @relation(fields: [codUnidad], references: [codUnidad])
+  pasos               FlujoPaso[]
+  versiones           Version[]    @relation("FlujoVersiones")
+  versionBorrador     Version?     @relation("FlujoVersionBorrador", fields: [idVersionBorrador], references: [idVersion])
+  solicitudes         Solicitud[]
+
+  @@map("flujos")
+}
+
+model FlujoPaso {
+  idPaso       BigInt                   @id @default(autoincrement()) @map("id_paso")
+  idFlujo      BigInt                   @map("id_flujo")
+  secuencia    Int
+  alcance      String                    @default("FIJO") @db.VarChar(20)
+  idAsignacion BigInt?                   @map("id_asignacion")
+  idCargo      Int?                      @map("id_cargo")
+  reqFirma     Boolean                   @default(true) @map("req_firma")
+
+  flujo        Flujo                     @relation(fields: [idFlujo], references: [idFlujo], onDelete: Cascade)
+  asignacion   AsignacionAdministrativo? @relation(fields: [idAsignacion], references: [idAsignacion])
+  cargo        Cargo?                    @relation(fields: [idCargo], references: [idCargo])
+
+  @@unique([idFlujo, secuencia], map: "uk_flujo_secuencia")
+  @@map("flujo_pasos")
+}
+
+model Plantilla {
+  idPlantilla     BigInt       @id @default(autoincrement()) @map("id_plantilla")
+  nombre          String       @db.VarChar(200)
+  descripcion     String?      @db.Text
+  codUnidad       Int          @map("cod_unidad")
+  audiencia       String[]     @default(["ESTUDIANTE"]) @db.VarChar(50)
+  estado          String       @default("A") @db.Char(1)
+  fechaRegistrado DateTime     @default(now()) @map("fecha_registrado") @db.Timestamptz
+
+  unidad          Unidad       @relation(fields: [codUnidad], references: [codUnidad])
+  versiones       Version[]
+
+  @@map("plantillas")
+}
+
+model Version {
+  idVersion           BigInt     @id @default(autoincrement()) @map("id_version")
+  idPlantilla         BigInt     @map("id_plantilla")
+  idFlujo             BigInt?    @map("id_flujo")
+  numeroVersion       Int        @default(1) @map("numero_version")
+  variableFormJson    Json       @default("{}") @map("variable_form_json")
+  disenoFormJson      Json       @default("{}") @map("diseno_form_json")
+  estado              String     @default("BORRADOR") @db.VarChar(20)
+  creadoPor           BigInt     @map("creado_por")
+  fechaPublic         DateTime?  @map("fecha_public") @db.Timestamptz
+
+  plantilla           Plantilla  @relation(fields: [idPlantilla], references: [idPlantilla], onDelete: Cascade)
+  flujo               Flujo?     @relation("FlujoVersiones", fields: [idFlujo], references: [idFlujo])
+  usuarioCreador      Usuario    @relation(fields: [creadoPor], references: [idUsuario])
+  flujosBorrador      Flujo[]    @relation("FlujoVersionBorrador")
+  solicitudes         Solicitud[]
+
+  @@unique([idPlantilla, numeroVersion], map: "uk_plantilla_version")
+  @@map("versiones")
+}

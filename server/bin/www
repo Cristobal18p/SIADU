@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+
+var app = require('../app');
+var debug = require('debug')('siadu:server');
+var http = require('http');
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+var server = http.createServer(app);
+
+server.on('error', onError);
+server.on('listening', onListening);
+
+// Primero se precalientan las conexiones a la base; si no responde, arranca al vencer el tope de espera
+require('../config/precalentar')()
+  .then(({ conexiones, ms }) => {
+    if (conexiones > 0) debug('%d conexiones a la base abiertas en %d ms', conexiones, ms);
+  })
+  .catch((err) => console.warn('[precalentar]', err.message))
+  .finally(() => server.listen(port));
+
+/** Apagado ordenado: deja de aceptar peticiones, espera las que están en curso y libera las conexiones. */
+let cerrando = false;
+function cerrarOrdenado(motivo) {
+  if (cerrando) return;
+  cerrando = true;
+  debug('Cerrando el servidor (%s)', motivo);
+  const limite = setTimeout(() => process.exit(1), 8000); // cierre forzado si algo no termina
+  limite.unref();
+  server.close(async () => {
+    await require('../utils/hashWorker').cerrar().catch(() => {});
+    await require('../config/prisma').$disconnect().catch(() => {});
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', () => cerrarOrdenado('SIGTERM'));
+process.on('SIGINT', () => cerrarOrdenado('SIGINT'));
+// En Windows, PM2 avisa con un mensaje en lugar de una señal
+process.on('message', (mensaje) => { if (mensaje === 'shutdown') cerrarOrdenado('mensaje de PM2'); });
+
+/** Normaliza el puerto: número, nombre de tubería o false. */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // tubería con nombre
+    return val;
+  }
+
+  if (port >= 0) {
+    return port;
+  }
+
+  return false;
+}
+
+/** Errores al empezar a escuchar. */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/** Aviso al empezar a escuchar. */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}

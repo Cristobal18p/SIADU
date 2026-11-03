@@ -1,0 +1,33 @@
+{
+  "name": "siadu",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node server/bin/www",
+    "postinstall": "npm install --prefix server",
+    "generate": "npm run generate --prefix server",
+    "test": "npm test --prefix server && npm test --prefix shared",
+    "lint": "eslint .",
+    "build": "npm run install:all && npm run build:client",
+    "dev": "pm2 start ecosystem.config.js --env development && echo \"\\nServidor en http://localhost:7001\"",
+    "stop": "pm2 stop SIADU",
+    "logs": "pm2 logs SIADU",
+    "reload": "pm2 reload SIADU",
+    "build:client": "cd client && npm run build",
+    "install:server": "npm install --prefix server",
+    "install:client": "npm install --prefix client --include=dev",
+    "install:all": "npm run install:server && npm run install:client"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
+}

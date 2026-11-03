@@ -1,0 +1,9 @@
+extends:
+  - recommended
+
+rules:
+  # El contrato es interno: no se publica con licencia ni con un servidor de producción
+  info-license: off
+  no-server-example.com: off
+  # common.yaml define componentes que usan los demás módulos, no él mismo
+  no-unused-components: off

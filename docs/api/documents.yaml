@@ -1,0 +1,78 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Documentos Oficiales
+  description: |
+    Generación del documento oficial en PDF vectorial de alta fidelidad a 300 DPI mediante Puppeteer.
+    La vista previa NO se genera aquí: el cliente la arma con los datos de `GET /api/requests/{id}`.
+    Todos los payloads utilizan estrictamente la convención **`camelCase`**.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Documents
+    description: Exportación de oficios y certificaciones oficiales en PDF
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  /api/documents/{requestId}/pdf:
+    get:
+      tags: [Documents]
+      operationId: downloadDocumentPdf
+      summary: Descargar documento oficial en PDF (Vectorial 300 DPI)
+      description: |
+        El backend compila y renderiza el documento mediante Chromium/Puppeteer.
+        Produce un archivo PDF oficial tamaño Carta (*Letter*) con fidelidad tipográfica estricta,
+        marca de agua institucional del Escudo de la UP de fondo (6-8% opacidad) y firmas estampadas.
+
+        **Quién puede descargarlo:** únicamente el solicitante que envió la solicitud. Los aprobadores y los
+        administradores ven el documento en la vista previa de pantalla (`GET /api/requests/{id}`) pero no pueden
+        descargarlo. Para quien no sea el solicitante, o si la solicitud no existe, responde `404`.
+
+        **Restricción de estado:** solo las solicitudes `APROBADO` tienen documento. Una solicitud `RECHAZADO`
+        o `PENDIENTE` no genera documento y retorna un error 400.
+
+        **Sin almacenamiento:** el PDF se genera en cada petición y se entrega directamente al navegador;
+        no se almacena. Solo se persisten datos. Las firmas se leen del Storage
+        privado con la clave de servicio del backend y se incrustan en el documento.
+      x-roles: [SOLICITANTE]
+      parameters:
+        - in: path
+          name: requestId
+          required: true
+          schema: { type: integer }
+          description: Identificador de la solicitud (`idSolicitud`)
+      responses:
+        "200":
+          description: Archivo binario PDF generado por el backend
+          headers:
+            Content-Disposition:
+              schema: { type: string, example: "attachment; filename=\"UP24-2026-0001.pdf\"" }
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "429":
+          $ref: "./common.yaml#/components/responses/DemasiadasSolicitudes"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

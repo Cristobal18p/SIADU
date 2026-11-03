@@ -1,0 +1,72 @@
+model Solicitud {
+  idSolicitud      BigInt        @id @default(autoincrement()) @map("id_solicitud")
+  idVersion        BigInt        @map("id_version")
+  idUsuario        BigInt        @map("id_usuario")
+  codUnidad        Int           @map("cod_unidad")
+  idFlujo          BigInt        @map("id_flujo")
+  codigoDocumento  String        @default("") @unique @map("codigo_documento") @db.VarChar(100)
+  datosJson        Json          @default("{}") @map("datos_json")
+  estado           String        @default("PENDIENTE") @db.VarChar(20)
+  fechaCreacion    DateTime      @default(now()) @map("fecha_creacion") @db.Timestamptz
+  fechaResolucion  DateTime?     @map("fecha_resolucion") @db.Timestamptz
+
+  version          Version       @relation(fields: [idVersion], references: [idVersion])
+  usuario          Usuario       @relation(fields: [idUsuario], references: [idUsuario])
+  unidad           Unidad        @relation(fields: [codUnidad], references: [codUnidad])
+  flujo            Flujo         @relation(fields: [idFlujo], references: [idFlujo])
+  aprobaciones     Aprobacion[]
+  pasosResueltos   SolicitudPaso[]
+
+  @@map("solicitudes")
+}
+
+// Pasos por escuela resueltos al radicar
+model SolicitudPaso {
+  idSolicitud  BigInt                   @map("id_solicitud")
+  secuencia    Int
+  idAsignacion BigInt                   @map("id_asignacion")
+
+  solicitud    Solicitud                @relation(fields: [idSolicitud], references: [idSolicitud], onDelete: Cascade)
+  asignacion   AsignacionAdministrativo @relation(fields: [idAsignacion], references: [idAsignacion])
+
+  @@id([idSolicitud, secuencia])
+  @@map("solicitud_pasos")
+}
+
+model Aprobacion {
+  idAprobacion     BigInt        @id @default(autoincrement()) @map("id_aprobacion")
+  idSolicitud      BigInt        @map("id_solicitud")
+  idFlujo          BigInt        @map("id_flujo")
+  secuencia        Int
+  idUsuario        BigInt        @map("id_usuario")
+  estado           String        @default("PENDIENTE") @db.VarChar(20)
+  comentario       String?       @db.Text
+  idFirma          BigInt?       @map("id_firma")
+  fechaAsignacion  DateTime      @default(now()) @map("fecha_asignacion") @db.Timestamptz
+  fechaAccion      DateTime?     @map("fecha_accion") @db.Timestamptz
+  cargoNombre      String?       @map("cargo_nombre") @db.VarChar(150)
+  areaNombre       String?       @map("area_nombre") @db.VarChar(150)
+  aprobadorNombre  String?       @map("aprobador_nombre") @db.VarChar(200)
+  aprobadorCedula  String?       @map("aprobador_cedula") @db.VarChar(30)
+
+  solicitud        Solicitud     @relation(fields: [idSolicitud], references: [idSolicitud], onDelete: Cascade)
+  usuario          Usuario       @relation(fields: [idUsuario], references: [idUsuario])
+  firma            Firma?        @relation(fields: [idFirma], references: [idFirma])
+
+  @@unique([idSolicitud, secuencia], map: "uk_aprobacion_solicitud_secuencia")
+  @@map("aprobaciones")
+}
+
+model Firma {
+  idFirma          BigInt        @id @default(autoincrement()) @map("id_firma")
+  idPersonal       BigInt        @map("id_personal")
+  urlFirma         String        @map("url_firma") @db.Text
+  hashFirma        String        @map("hash_firma") @db.VarChar(255)
+  estado           String        @default("A") @db.Char(1)
+  fechaRegistrado  DateTime      @default(now()) @map("fecha_registrado") @db.Timestamptz
+
+  personal         Personal      @relation(fields: [idPersonal], references: [idPersonal], onDelete: Cascade)
+  aprobaciones     Aprobacion[]
+
+  @@map("firmas")
+}

@@ -1,0 +1,690 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Componentes Compartidos
+  description: |
+    Esquemas, respuestas y componentes reutilizados por todos los contratos de módulo de SIADU.
+    Todos los campos de datos utilizan estrictamente la convención **`camelCase`**.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+paths: {}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # RESPUESTAS DE ERROR ESTÁNDAR
+  responses:
+    ValidacionFallida:
+      description: Datos de entrada faltantes o con formato inválido (HTTP 400)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: VALIDACION_FALLIDA
+              mensaje: "Hay campos requeridos o con formato incorrecto"
+              detalles:
+                - campo: password
+                  mensaje: "La contraseña es requerida"
+
+    NoAutenticado:
+      description: Token JWT ausente, inválido o expirado (HTTP 401)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: NO_AUTENTICADO
+              mensaje: "Sesión no válida o expirada. Inicie sesión nuevamente."
+
+    DemasiadasSolicitudes:
+      description: |
+        Límite de peticiones superado (HTTP 429). Cualquier endpoint de la API puede responderlo: 300 peticiones por
+        minuto por usuario (por IP sin sesión). El PDF tiene además 30 descargas cada 10 minutos por usuario.
+      headers:
+        Retry-After:
+          description: Segundos que debe esperar el cliente antes de volver a intentar
+          schema: { type: integer, example: 60 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: DEMASIADAS_SOLICITUDES
+              mensaje: "Ha hecho demasiadas solicitudes seguidas. Espere un momento e intente de nuevo."
+
+    SinPermiso:
+      description: |
+        El usuario autenticado no cuenta con el rol o privilegios requeridos (HTTP 403). Cualquier endpoint puede
+        responder además `403` con `CAMBIO_PASSWORD_REQUERIDO` mientras la cuenta tenga la contraseña inicial.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: SIN_PERMISO
+              mensaje: "No cuenta con los privilegios requeridos para realizar esta acción."
+
+    CambioPasswordRequerido:
+      description: |
+        La cuenta todavía tiene la contraseña inicial (`debeCambiarPassword: true`): debe cambiarla con
+        `POST /api/auth/password` antes de usar este endpoint (HTTP 403)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: CAMBIO_PASSWORD_REQUERIDO
+              mensaje: "Debe cambiar su contraseña inicial antes de continuar."
+
+    NoEncontrado:
+      description: El recurso solicitado no existe (HTTP 404)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: NO_ENCONTRADO
+              mensaje: "El recurso solicitado no fue encontrado."
+
+    Conflicto:
+      description: La operación no es válida para el estado actual del recurso (HTTP 409)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: CONFLICTO_ESTADO
+              mensaje: "Esta solicitud ya fue resuelta y no puede ser modificada."
+
+    ErrorServidor:
+      description: Error no controlado en el servidor (HTTP 500)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              codigo: ERROR_INTERNO
+              mensaje: "Ocurrió un error inesperado en el servidor."
+
+  schemas:
+    # ESTRUCTURAS GENÉRICAS Y CONTROL
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [codigo, mensaje]
+          properties:
+            codigo:
+              type: string
+              description: |
+                Código de error legible por máquina en MAYÚSCULAS. El cliente decide por el estado HTTP y, cuando hace
+                falta distinguir, por este código. Códigos definidos:
+                - `VALIDACION_FALLIDA` (400): campos faltantes o incorrectos; `detalles` indica cuáles.
+                - `APROBADOR_INVALIDO` (400 al crear o editar un flujo; 409 al publicar o radicar): un paso tiene un titular
+                  sin cuenta activa o sin el rol `APROBADOR`. En el 400, `detalles[].campo = pasos[i].idAsignacion`.
+                  En un paso `ESCUELA_SOLICITANTE`, al radicar, también se usa si la escuela del solicitante no tiene
+                  un titular del cargo que pueda aprobar.
+                - `PASSWORD_ACTUAL_INCORRECTA` (400): la contraseña actual no coincide.
+                - `CREDENCIALES_INVALIDAS` (401): login rechazado.
+                - `NO_AUTENTICADO` (401): token ausente, inválido o vencido.
+                - `DEMASIADOS_INTENTOS` (429): el login superó los intentos fallidos permitidos; trae `Retry-After`.
+                - `DEMASIADAS_SOLICITUDES` (429): se superó el límite de peticiones (general de la API o de PDF); trae
+                  `Retry-After`.
+                - `SIN_PERMISO` (403): el rol no permite la acción.
+                - `CAMBIO_PASSWORD_REQUERIDO` (403): la cuenta debe cambiar su contraseña inicial.
+                - `NO_ENCONTRADO` (404): el recurso no existe o el usuario no tiene acceso a él.
+                - `CONFLICTO_ESTADO` (409): la operación no es válida para el estado actual del recurso.
+                - `SERVICIO_NO_DISPONIBLE` (503): el servidor está saturado (sin conexión a la base disponible a tiempo). La
+                  respuesta trae `Retry-After` (segundos); el cliente puede reintentar.
+                - `ERROR_INTERNO` (500): error no controlado.
+              example: CREDENCIALES_INVALIDAS
+            mensaje:
+              type: string
+              description: Mensaje en español para mostrar en la interfaz
+              example: "Identificador o contraseña incorrectos."
+            detalles:
+              type: array
+              description: Lista detallada de fallos de validación por campo
+              items:
+                type: object
+                properties:
+                  campo:   { type: string, example: "identificador" }
+                  mensaje: { type: string, example: "El identificador no puede estar vacío" }
+
+    Paginacion:
+      type: object
+      description: Metadatos para respuestas de colecciones paginadas
+      required: [total, pagina, limite, totalPaginas]
+      properties:
+        total:
+          type: integer
+          description: Total general de registros que cumplen los filtros
+          example: 45
+        pagina:
+          type: integer
+          description: Número de página actual (inicia en 1)
+          example: 1
+        limite:
+          type: integer
+          description: Cantidad máxima de registros por página
+          example: 10
+        totalPaginas:
+          type: integer
+          description: Total de páginas calculadas
+          example: 5
+
+    # ENUMS DEL DOMINIO INSTITUCIONAL
+    RolSistema:
+      type: string
+      description: Rol de privilegios en el sistema (control de acceso y navegación)
+      enum: [SOLICITANTE, APROBADOR, ADMINISTRADOR]
+
+    Estamento:
+      type: string
+      description: Estamento universitario del usuario (determina trámites aplicables)
+      enum: [ESTUDIANTE, PROFESOR, ADMINISTRATIVO]
+
+    EstadoSolicitud:
+      type: string
+      description: Estado del trámite institucional
+      enum: [PENDIENTE, APROBADO, RECHAZADO]
+
+    EstadoAprobacion:
+      type: string
+      description: Estado de un paso individual en el flujo de aprobación
+      enum: [PENDIENTE, APROBADO, RECHAZADO]
+
+    EstadoVersion:
+      type: string
+      description: Ciclo de vida de una versión de plantilla
+      enum: [BORRADOR, ACTIVO, INACTIVO]
+
+    EstadoFlujo:
+      type: string
+      description: |
+        Ciclo de vida de un flujo de aprobación (en la BD `flujos.estado` guarda `B` y `A`).
+        - `BORRADOR`: flujo nuevo, dueño de una versión de plantilla en borrador. Se puede editar (`PUT /api/flows/{id}`)
+          y no aparece en la lista de flujos reutilizables.
+        - `ACTIVO`: flujo publicado junto con su plantilla. Su estructura no cambia nunca: para agregar, quitar o
+          reordenar pasos se crea otro flujo. Es reutilizable por otras plantillas de la unidad.
+      enum: [BORRADOR, ACTIVO]
+
+    TipoCampo:
+      type: string
+      description: |
+        Tipo de control interactivo para recolectar datos en el formulario web.
+        - `text`: texto corto. `textarea`: texto largo. `number`: número. `date`: fecha.
+        - `select`: lista de opciones; se muestra como lista desplegable o como botones de opción
+          según `presentacion`.
+        - `checkbox`: confirmación legal (declaración jurada); siempre es requerido y lleva `textoLegal`.
+      enum: [text, number, date, textarea, select, checkbox]
+
+    # ENTIDADES COMPARTIDAS (camelCase)
+    UnidadResumen:
+      type: object
+      properties:
+        codUnidad: { type: integer, example: 24 }
+        nombre:    { type: string, description: "Nombre sin el tipo de unidad", example: "Informática, Electrónica y Comunicación" }
+        tipoUnidad: { type: string, nullable: true, description: "FACULTAD, DIRECCION, INSTITUTO, VICERRECTORIA o SECRETARÍA", example: "FACULTAD" }
+        abrev:     { type: string, nullable: true, example: "FIEC" }
+
+    ResolucionResumen:
+      type: object
+      description: |
+        Cargo que cerró la solicitud (`APROBADO` o `RECHAZADO`), tal como quedó al decidir: no cambia aunque después
+        cambien el cargo o su titular.
+      required: [nombreCargo, fecha]
+      properties:
+        nombreCargo: { type: string, example: "Decano/a" }
+        titular:     { type: string, nullable: true, description: "Nombre de quien ocupa el cargo; `null` si no hay titular asignado", example: "Julio Demo" }
+        fecha:       { type: string, format: date-time, example: "2026-10-14T10:15:00Z" }
+
+    CarreraResumen:
+      type: object
+      properties:
+        idCarrera:   { type: integer, example: 1 }
+        descripcion: { type: string, example: "Licenciatura en Ingeniería en Informática" }
+        escuela:
+          type: string
+          nullable: true
+          description: |
+            Escuela académica a la que pertenece la carrera (`null` si la carrera aún no tiene escuela asignada). De ella depende el Director/a de Escuela que aprueba los
+            trámites del estudiante (pasos `ESCUELA_SOLICITANTE`) y la línea de escuela del membrete.
+          example: "Escuela de Ingeniería Informática"
+
+    CargoResumen:
+      type: object
+      required: [idAsignacion, idCargo, nombreCargo, titularActual, idUsuarioTitular, area, esAprobador]
+      properties:
+        idAsignacion:  { type: integer, example: 12, description: "Identificador de la asignación administrativa vigente" }
+        idCargo:       { type: integer, example: 14 }
+        nombreCargo:   { type: string, example: "Director/a de Escuela" }
+        titularActual: { type: string, example: "Dra. Lia Muestra", description: "Nombre de la persona que ocupa la asignación" }
+        idUsuarioTitular:
+          type: integer
+          nullable: true
+          description: |
+            Usuario de la persona que ocupa el cargo; `null` si esa persona no tiene cuenta. Identifica a la persona:
+            una misma persona puede tener varias asignaciones (cargos) y no puede repetirse en un flujo.
+          example: 31
+        area:          { type: string, example: "Escuela de Ingeniería Informática", description: "La escuela o el departamento de la asignación si los tiene («Departamento de …»); si no, su área («Área General» si no define una)" }
+        escuela:
+          type: string
+          nullable: true
+          description: |
+            Escuela de la asignación. Solo los cargos por escuela (hoy «Director/a de Escuela» y la secretaria de cada
+            escuela) la traen; vale `null` en los cargos de toda la facultad (Decano/a, Vicedecano/a, Secretaría
+            Administrativa) y en los de un departamento. Con un `idCargo` que tiene escuela, un flujo puede usar el paso
+            `ESCUELA_SOLICITANTE`.
+          example: "Escuela de Ingeniería Informática"
+        departamento:
+          type: string
+          nullable: true
+          description: |
+            Departamento de la asignación (directores de departamento y sus secretarias); `null` en los cargos de toda
+            la facultad. Es el que usa la variable automática `personal.departamento`.
+          example: "Informática"
+        esAprobador:
+          type: boolean
+          description: |
+            `true` si el titular puede aprobar: cuenta activa, persona y asignación activas, y rol `APROBADOR`. El rol
+            es de la persona; el paso concreto (cargo) lo elige el administrador por `idAsignacion`, y un paso con
+            `reqFirma: false` es un visto bueno sin firma. Solo estos cargos pueden ser pasos de un flujo; un titular
+            sin cuenta, inactivo o sin el rol vale `false`.
+          example: true
+
+    UsuarioResumen:
+      type: object
+      properties:
+        idUsuario:      { type: integer, example: 1 }
+        nombreCompleto: { type: string, example: "Alex Demo" }
+        correo:         { type: string, format: email, example: "alex.demo@up.ac.pa" }
+        cedula:         { type: string, nullable: true, example: "9-000-0001" }
+
+    # ESPECIFICACIÓN DEL CONSTRUCTOR Y FORMULARIOS
+    OpcionSelector:
+      type: object
+      required: [valor, etiqueta]
+      properties:
+        valor:    { type: string, example: "LABORAL" }
+        etiqueta: { type: string, example: "Cruce de horario laboral certificado" }
+
+    ValidacionCampo:
+      type: object
+      description: Restricciones configurables; cada una aplica solo a los tipos indicados
+      properties:
+        min:    { type: number, description: "Mínimo de caracteres (`text`, `textarea`) o valor numérico (`number`)", example: 3 }
+        max:    { type: number, description: "Máximo de caracteres (`text`, `textarea`) o valor numérico (`number`)", example: 60 }
+        patron:
+          type: string
+          enum: ["^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]+$", "^[A-Za-z0-9 ]+$", "^[^a-z]+$"]
+          description: |
+            Formato opcional para `text`: solo letras, alfanumérico o mayúsculas obligatorias. Solo se aceptan estos
+            tres valores (`400` al guardar con otro), para que ninguna expresión regular pueda trabar el servidor.
+          example: "^[A-Za-z0-9 ]+$"
+        decimales:       { type: boolean, default: false, description: "`number`: permite decimales; si es `false` solo enteros", example: false }
+        reglaTemporal:   { type: string, enum: [libre, pasadas, futuras], default: libre, description: "`date`: solo fechas pasadas, solo futuras o libre", example: libre }
+        soloDiasHabiles: { type: boolean, default: false, description: "`date`: deshabilita sábados y domingos", example: false }
+
+    VariableFormulario:
+      type: object
+      required: [id, etiqueta, tipo, requerido]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-zA-Z][a-zA-Z0-9_]*$"
+          description: Identificador técnico de la variable insertada en el cuerpo TipTap
+          example: codigoAsignatura
+        etiqueta:
+          type: string
+          description: |
+            Nombre corto de la variable. Es el texto de la cápsula en el editor y el rótulo de la respuesta en el
+            resumen y el detalle de la solicitud. Si no hay `pregunta`, también es la etiqueta del campo en el
+            formulario web.
+          example: "Código y Nombre de la Materia"
+        pregunta:
+          type: string
+          maxLength: 200
+          description: |
+            Etiqueta del campo en el formulario web: indica al solicitante qué debe responder. Si se omite, el
+            formulario muestra `etiqueta`. El constructor la exige en las plantillas nuevas.
+          example: "Indique el código y el nombre de la materia que desea retirar"
+        tipo:
+          $ref: "#/components/schemas/TipoCampo"
+        requerido:
+          type: boolean
+          example: true
+        placeholder:
+          type: string
+          example: "Ej: INF-101 Programación I"
+        opciones:
+          type: array
+          description: Lista de opciones requerida cuando tipo = 'select'
+          items:
+            $ref: "#/components/schemas/OpcionSelector"
+        presentacion:
+          type: string
+          enum: [lista, radio]
+          default: lista
+          description: "`select`: lista desplegable o botones de opción"
+        opcionOtro:
+          type: boolean
+          default: false
+          description: |
+            `select`: agrega la opción «Otro». Si el solicitante la elige, se muestra un campo de texto adicional:
+            el valor de la variable es `OTRO` y el texto libre se guarda en `datosJson` bajo la clave `{id}Otro`.
+        textoLegal:
+          type: string
+          description: "`checkbox`: redacción del compromiso que el solicitante acepta; el valor en `datosJson` es `true`"
+          example: "Declaro bajo juramento que la información suministrada es veraz."
+        validaciones:
+          $ref: "#/components/schemas/ValidacionCampo"
+
+    VariableFormJson:
+      type: object
+      required: [variables]
+      description: |
+        Definición del formulario web. El formulario nace del documento: solo se guardan las variables que se
+        usan en `cuerpoDocumento` y cada nodo `variable` de formulario debe tener su definición aquí. Las
+        variables automáticas del sistema (`auth.*`, `estudiante.*`, `personal.*`, `sistema.*`, `solicitud.*`)
+        no se declaran aquí. Los `id` deben ser únicos y ninguno puede coincidir con la clave `{id}Otro` de un
+        `select` con `opcionOtro`.
+        Las claves de `datosJson` que empiezan con `_` quedan reservadas para el sistema.
+      properties:
+        variables:
+          type: array
+          items:
+            $ref: "#/components/schemas/VariableFormulario"
+
+    LogoInstitucional:
+      type: string
+      nullable: true
+      description: |
+        Ruta de uno de los logos estáticos del proyecto, que comparten el cliente (`client/public/logos/`) y el
+        motor de PDF. `null` desactiva el logo. No hay subida de archivos.
+      enum: [/logos/escudo_up.png, /logos/logo_fiec.png, null]
+      example: /logos/escudo_up.png
+
+    DisenoFormato:
+      type: object
+      description: |
+        Tipografía base del documento. Aplica a todo el texto que no tenga su propia marca `textStyle`.
+        Los títulos (`heading`) mantienen su tamaño fijo (16 pt / 14 pt). Si se omite, rigen los valores por defecto.
+      properties:
+        fuente:       { type: string, enum: ["Arial", "Times New Roman"], default: "Arial", example: "Arial" }
+        tamano:       { type: string, enum: ["11pt", "12pt"], default: "11pt", example: "11pt" }
+        interlineado: { type: string, enum: ["1.0", "1.15", "1.5"], default: "1.15", example: "1.15" }
+
+    DisenoEncabezado:
+      type: object
+      properties:
+        activo:     { type: boolean, example: true }
+        logoIzqUrl: { $ref: "#/components/schemas/LogoInstitucional" }
+        logoDerUrl: { $ref: "#/components/schemas/LogoInstitucional" }
+        linea1:     { type: string, example: "UNIVERSIDAD DE PANAMÁ", description: "Admite los mismos marcadores `{{id}}` que `linea3`" }
+        linea2:     { type: string, example: "FACULTAD DE INFORMÁTICA, ELECTRÓNICA Y COMUNICACIÓN", description: "Admite los mismos marcadores `{{id}}` que `linea3`" }
+        linea3:
+          type: string
+          nullable: true
+          description: |
+            Dependencia (opcional). Cada línea admite marcadores `{{id}}` con el id de una variable automática
+            (`VariablesSistema`), que se reemplazan por el valor del solicitante y se imprimen en mayúsculas.
+            Si el valor es `null`, la línea no se imprime. Al guardar la versión,
+            un marcador cuyo `id` no sea una variable automática responde `400` (`VALIDACION_FALLIDA`,
+            `detalles[].campo = disenoFormJson.encabezado.linea3`).
+          example: "{{estudiante.escuela}}"
+        linea4:     { type: string, nullable: true, description: "Sección, coordinación o despacho específico (opcional). Admite los mismos marcadores `{{id}}` que `linea3`", example: "DESPACHO DEL DECANO" }
+
+    DisenoPiePagina:
+      type: object
+      description: |
+        Pie de página: va al fondo de **cada** hoja. El texto es libre y con formato (`contenido`); si
+        `mostrarPaginacion` es `true`, se agrega una línea «Página X de Y» alineada a la derecha.
+      properties:
+        activo:            { type: boolean, default: true, example: true }
+        contenido:
+          type: object
+          description: |
+            Árbol del editor (`type: doc`) con el texto del pie. Nodos permitidos:
+            - **`paragraph`** con `attrs.textAlign` (`left`, `center`, `right`; por defecto `center`).
+            - **`text`** con marcas `bold`, `italic`, `underline` y `textStyle` (`attrs.fontSize`: `"7pt"`,
+              `"8pt"`, `"9pt"` o `"10pt"`; sin marca, 8 pt).
+            - **`hardBreak`**: salto de línea dentro del párrafo.
+            Lo demás se ignora (se conserva solo su texto).
+          properties:
+            type:    { type: string, example: "doc" }
+            content: { type: array, items: { type: object } }
+          example:
+            type: doc
+            content:
+              - type: paragraph
+                attrs: { textAlign: center }
+                content:
+                  - type: text
+                    text: "2026: “Año del Fortalecimiento de la Autonomía Universitaria, mediante la Elección Democrática de sus Autoridades”"
+                    marks: [{ type: italic }]
+              - type: paragraph
+                attrs: { textAlign: center }
+                content: [{ type: text, text: "Estafeta Universitario, Panamá, República de Panamá" }]
+              - type: paragraph
+                attrs: { textAlign: center }
+                content: [{ type: text, text: "Teléfono 523-6008-6001" }]
+        mostrarPaginacion: { type: boolean, default: false, example: true }
+        lemaOficial:
+          type: string
+          deprecated: true
+          description: |
+            Obsoleto, igual que `direccion` y `telefonos`. Solo se lee si no viene `contenido`.
+        direccion: { type: string, deprecated: true }
+        telefonos: { type: string, deprecated: true }
+
+    DisenoFormJson:
+      type: object
+      required: [cuerpoDocumento]
+      description: |
+        Diseño completo del documento. La vista previa del cliente y el PDF del servidor lo interpretan con las
+        mismas reglas (hoja Carta, márgenes 25/20/20/20 mm).
+
+        **Representación de valores en el documento** (cómo se imprime cada nodo `variable`):
+        - `text`, `textarea`: el texto tal cual (en `textarea` se respetan los saltos de línea).
+        - `number`: el número tal cual se guardó.
+        - `date`: fecha formal en español, `5 de octubre de 2026`.
+        - `select`: la `etiqueta` de la opción elegida; si el valor es `OTRO`, el texto libre de `{id}Otro`.
+        - `checkbox`: `Sí`. El `textoLegal` no se imprime dentro del texto.
+        - Variable opcional sin respuesta o variable automática en `null`: no se imprime nada.
+        - Variable automática: el valor de `variablesSistema` de la solicitud. En la vista previa del constructor
+          se usan datos de ejemplo.
+      properties:
+        formato:
+          $ref: "#/components/schemas/DisenoFormato"
+        encabezado:
+          $ref: "#/components/schemas/DisenoEncabezado"
+        cuerpoDocumento:
+          type: object
+          description: |
+            Árbol AST de TipTap (`type: doc`). Nodos y atributos permitidos:
+            - **`paragraph`** y **`heading`** (`attrs.level` 1 = 16 pt negrita, 2 = 14 pt negrita). Atributos de bloque:
+              `textAlign` (`left`, `center`, `right`, `justify`; por defecto `justify`), `lineHeight`
+              (`"1.0"`, `"1.15"`, `"1.5"`; por defecto el `interlineado` de `formato`) y `indent` (entero ≥ 0,
+              niveles de sangría).
+            - **`text`** con marcas `bold`, `italic`, `underline` y `textStyle` (`attrs.fontFamily`:
+              `"Arial"` o `"Times New Roman"`; `attrs.fontSize`: `"11pt"` o `"12pt"`). Sin marca, rige `formato`.
+            - **`hardBreak`**: salto de línea dentro del mismo párrafo (Shift+Enter).
+            - **`bulletList`**, **`orderedList`** (`attrs.start`, por defecto 1) y **`listItem`**.
+            - **`table`**, **`tableRow`**, **`tableHeader`** y **`tableCell`**. Las celdas admiten `attrs.colspan`
+              y `attrs.rowspan` (enteros ≥ 1, por defecto 1) y `attrs.colwidth` (arreglo de anchos en px o `null`).
+            - **`pageBreak`**: salto de página manual.
+            - **`variable`** (inline, `attrs.id`): referencia a una variable. El `id` es o bien un `id` declarado
+              en `variableFormJson`, o bien una variable automática del sistema (ver `VariablesSistema`).
+            - **`signatureBlock`**: bloque de firmas; como máximo uno por documento. Tiene una casilla por cada paso
+              del flujo con `reqFirma`, en orden de `secuencia`, distribuidas en filas de 2; si queda una sola en la
+              última fila, va centrada (1 firma: centrada; 2: dos columnas; 3: dos arriba y una centrada abajo).
+              Si no cabe en la hoja, se parte entre filas, nunca dentro de una casilla. `attrs.columnas` es opcional y obsoleto: si llega, se ignora.
+          properties:
+            type:    { type: string, example: "doc" }
+            content: { type: array, items: { type: object } }
+        piePagina:
+          $ref: "#/components/schemas/DisenoPiePagina"
+
+    VariablesSistema:
+      type: object
+      description: |
+        Valores de las variables automáticas. El backend los resuelve y los **congela al radicar** la solicitud
+        (`POST /api/requests`), así el documento no cambia si después cambian los datos del solicitante.
+        Valen `null` cuando no aplican al solicitante.
+        La vista previa del cliente y el PDF usan estos mismos valores.
+      required: [auth.nombre_completo, auth.cedula, auth.correo, estudiante.carrera, estudiante.escuela, estudiante.facultad, personal.cargo, personal.departamento, sistema.fecha_formal, solicitud.codigo]
+      properties:
+        auth.nombre_completo:  { type: string, nullable: true, example: "Alex Demo" }
+        auth.cedula:           { type: string, nullable: true, example: "9-000-0001" }
+        auth.correo:           { type: string, nullable: true, example: "alex.demo@up.ac.pa" }
+        estudiante.carrera:    { type: string, nullable: true, description: "Solo estudiantes", example: "Licenciatura en Ingeniería en Informática" }
+        estudiante.escuela:    { type: string, nullable: true, description: "Escuela de la carrera del estudiante (`CarreraResumen.escuela`); solo estudiantes", example: "Escuela de Ingeniería Informática" }
+        estudiante.facultad:   { type: string, nullable: true, description: "Tipo y nombre de la unidad del solicitante: `{Tipo} de {nombre}` (hoy siempre `Facultad de …`). Pese al prefijo, aplica a todo solicitante", example: "Facultad de Informática, Electrónica y Comunicación" }
+        personal.cargo:        { type: string, nullable: true, description: "Cargo de mayor jerarquía entre las asignaciones activas; solo personal con cargo", example: "Secretaria Administrativa" }
+        personal.departamento: { type: string, nullable: true, description: "Departamento de la asignación de ese cargo; `null` si la asignación no tiene departamento", example: "Arquitectura y Redes de Computadoras" }
+        sistema.fecha_formal:  { type: string, nullable: true, description: "Fecha de radicación ya formateada", example: "Panamá, 5 de octubre de 2026" }
+        solicitud.codigo:      { type: string, nullable: true, example: "UP24-2026-0001" }
+
+    PasoDocumento:
+      type: object
+      description: |
+        Paso del flujo de la solicitud (`solicitudes.id_flujo`), alcanzado o no. Sirve para la ruta de
+        aprobación y para dibujar el bloque de firmas: los pasos con `reqFirma` que aún no están `APROBADO`
+        se muestran como «[Pendiente de Aprobación y Firma]» con el titular y el cargo esperados.
+
+        **Historial inmutable:** en un paso ya decidido (`APROBADO` o `RECHAZADO`), `nombreCargo`, `area` y `titular`
+        son los que había al decidir y no cambian aunque después cambien el cargo o la persona. En los pasos
+        pendientes o futuros son los vigentes.
+      required: [secuencia, nombreCargo, area, reqFirma, estado]
+      properties:
+        secuencia:   { type: integer, example: 1 }
+        nombreCargo: { type: string, example: "Director/a de Escuela" }
+        titular:     { type: string, nullable: true, description: "Quien ocupa el cargo de la asignación del paso", example: "Dra. Lia Muestra" }
+        area:        { type: string, example: "Escuela de Ingeniería Informática", description: "Siempre tiene valor («Área General» si la asignación no define una)" }
+        reqFirma:    { type: boolean, example: true }
+        estado:
+          type: string
+          nullable: true
+          enum: [PENDIENTE, APROBADO, RECHAZADO, null]
+          description: "Estado del paso (`EstadoAprobacion`); `null` si la solicitud aún no llega a este paso (o ya no llegará, tras un rechazo)"
+          example: APROBADO
+        fechaAccion: { type: string, format: date-time, nullable: true, example: "2026-10-06T15:00:00Z" }
+        comentario:  { type: string, nullable: true, example: "Cumple con el reglamento académico." }
+        firmaUrl:    { type: string, nullable: true, description: "URL firmada y temporal de la imagen de la firma (el bucket de Storage es privado); solo en pasos aprobados con `reqFirma`. Caduca: no se guarda ni se cachea", example: "https://proyecto.supabase.co/storage/v1/object/sign/firmas/12/20261015.png?token=..." }
+
+    PasoFlujo:
+      description: |
+        Paso de un flujo de aprobación: `PasoFlujoFijo` o `PasoFlujoEscuela`, según `alcance` (sin `alcance` es `FIJO`).
+        Al crear o editar un flujo, un paso con campos de la otra clase responde `400` (`VALIDACION_FALLIDA`).
+
+        Paso de un flujo de aprobación. Hay dos clases, según `alcance`:
+
+        - `FIJO` (por defecto): una autoridad concreta, `idAsignacion`. Es lo que se usa en los cargos de toda la
+          facultad (Decano/a, Vicedecano/a, Secretaría Administrativa) y en los de un departamento.
+        - `ESCUELA_SOLICITANTE`: un cargo **por escuela** (`idCargo`; hoy «Director/a de Escuela»). El flujo no fija a
+          la persona: al radicar, el backend toma al titular de ese cargo en la escuela de la carrera del solicitante
+          (`CarreraResumen.escuela`). Así una misma plantilla sirve a todos los estudiantes y cada trámite llega al
+          director de su escuela. Solo se acepta en plantillas dirigidas únicamente a `ESTUDIANTE`.
+
+        En las respuestas, el paso `ESCUELA_SOLICITANTE` llega sin resolver (`idAsignacion` y `titular` en `null`, `area`
+        «Escuela del solicitante») para el administrador, y resuelto con la escuela del usuario para el solicitante
+        (`GET /api/templates/{id}`). Una vez radicada, la ruta de la solicitud queda con el titular concreto
+        (`PasoDocumento`).
+      oneOf:
+        - $ref: "#/components/schemas/PasoFlujoFijo"
+        - $ref: "#/components/schemas/PasoFlujoEscuela"
+
+    PasoFlujoBase:
+      type: object
+      required: [secuencia]
+      properties:
+        secuencia:
+          type: integer
+          minimum: 1
+          description: Posición del paso. En un flujo las secuencias son únicas y consecutivas desde 1
+          example: 1
+        reqFirma:
+          type: boolean
+          default: true
+          example: true
+        nombreCargo:
+          type: string
+          readOnly: true
+          description: Solo en respuestas; al crear un flujo se deduce de `idAsignacion` o de `idCargo`
+          example: "Director/a de Escuela"
+        titular:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Solo en respuestas; al crear un flujo se deduce de `idAsignacion`. `null` en un paso `ESCUELA_SOLICITANTE` sin resolver
+          example: "Dra. Lia Muestra"
+        area:
+          type: string
+          readOnly: true
+          description: Solo en respuestas; área de la asignación («Área General» si no define una; «Escuela del solicitante» en un paso `ESCUELA_SOLICITANTE` sin resolver)
+          example: "Escuela de Ingeniería Informática"
+
+    PasoFlujoFijo:
+      description: Paso de una autoridad concreta (cargos de toda la facultad o de un departamento)
+      allOf:
+        - $ref: "#/components/schemas/PasoFlujoBase"
+        - type: object
+          required: [idAsignacion]
+          properties:
+            alcance:
+              type: string
+              enum: [FIJO]
+              default: FIJO
+              example: FIJO
+            idAsignacion:
+              type: integer
+              description: Identificador de la asignación administrativa de la autoridad
+              example: 12
+            idCargo:
+              type: integer
+              readOnly: true
+              description: Solo en respuestas; se deduce de `idAsignacion`. Al crear un flujo no se envía
+              example: 14
+
+    PasoFlujoEscuela:
+      description: |
+        Paso por escuela: el titular del cargo en la escuela de la carrera del solicitante, que se resuelve al radicar
+      allOf:
+        - $ref: "#/components/schemas/PasoFlujoBase"
+        - type: object
+          required: [alcance, idCargo]
+          properties:
+            alcance:
+              type: string
+              enum: [ESCUELA_SOLICITANTE]
+              example: ESCUELA_SOLICITANTE
+            idCargo:
+              type: integer
+              description: Un cargo cuyas asignaciones tienen escuela (`CargoResumen.escuela`)
+              example: 9
+            idAsignacion:
+              type: integer
+              nullable: true
+              readOnly: true
+              description: Solo en respuestas. `null` mientras no se conoce al solicitante; en la vista del solicitante (`GET /api/templates/{id}`), la asignación de su escuela. Al crear un flujo no se envía
+              example: null

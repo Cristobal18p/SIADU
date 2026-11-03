@@ -1,0 +1,95 @@
+# RAÍZ DE LA ESPECIFICACIÓN UNIFICADA — no se edita el resultado, se edita cada módulo.
+# `openapi.yaml` se genera con:  npm run bundle   (dentro de docs/api)
+openapi: 3.0.3
+
+info:
+  title: SIADU — API Oficial Completa
+  description: |
+    Especificación unificada OpenAPI 3.0 para el Sistema Integral de Automatización de Documentos Universitarios (SIADU).
+    Universidad de Panamá — Facultad de Informática, Electrónica y Comunicación (FIEC).
+    Todos los datos en peticiones y respuestas utilizan estrictamente la convención **`camelCase`**.
+
+    Este archivo se **genera** a partir de los módulos de `docs/api` (`auth`, `catalogs`, `templates`, `requests`,
+    `approvals`, `documents`) y de `common.yaml`. Los cambios se hacen en los módulos, nunca aquí.
+
+    **Límites:** cualquier endpoint puede responder `429` `DEMASIADAS_SOLICITUDES` (300 peticiones por minuto por
+    usuario); el login y el PDF tienen límites propios (ver cada operación).
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Auth
+    description: Autenticación con JWT (cédula / @up.ac.pa) y perfil de usuario
+  - name: Catalogs
+    description: Catálogos de cargos, autoridades y áreas institucionales
+  - name: Flows
+    description: Flujos secuenciales de aprobación reutilizables por unidad
+  - name: Templates
+    description: Inventario administrativo paginado, constructor TipTap y catálogo de trámites
+  - name: Requests
+    description: Envío de solicitudes, historial del solicitante y línea de tiempo
+  - name: Approvals
+    description: Bandeja de entrada de autoridades y resoluciones (Aprobado / Rechazado)
+  - name: Documents
+    description: Generación de PDF oficial a 300 DPI (Puppeteer). La vista previa se arma en el cliente
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/auth/login:
+    $ref: "./auth.yaml#/paths/~1api~1auth~1login"
+  /api/auth/logout:
+    $ref: "./auth.yaml#/paths/~1api~1auth~1logout"
+  /api/auth/password:
+    $ref: "./auth.yaml#/paths/~1api~1auth~1password"
+  /api/auth/me:
+    $ref: "./auth.yaml#/paths/~1api~1auth~1me"
+
+  /api/catalogs/cargos:
+    $ref: "./catalogs.yaml#/paths/~1api~1catalogs~1cargos"
+  /api/flows:
+    $ref: "./catalogs.yaml#/paths/~1api~1flows"
+  /api/flows/{id}:
+    $ref: "./catalogs.yaml#/paths/~1api~1flows~1{id}"
+
+  /api/templates:
+    $ref: "./templates.yaml#/paths/~1api~1templates"
+  /api/templates/catalog:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1catalog"
+  /api/templates/summary:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1summary"
+  /api/templates/{id}:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1{id}"
+  /api/templates/{id}/versions:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1{id}~1versions"
+  /api/templates/{id}/publish:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1{id}~1publish"
+
+  /api/templates/{id}/deactivate:
+    $ref: "./templates.yaml#/paths/~1api~1templates~1{id}~1deactivate"
+
+  /api/requests:
+    $ref: "./requests.yaml#/paths/~1api~1requests"
+  /api/requests/me:
+    $ref: "./requests.yaml#/paths/~1api~1requests~1me"
+  /api/requests/{id}:
+    $ref: "./requests.yaml#/paths/~1api~1requests~1{id}"
+
+  /api/approvals/pending:
+    $ref: "./approvals.yaml#/paths/~1api~1approvals~1pending"
+  /api/approvals/history:
+    $ref: "./approvals.yaml#/paths/~1api~1approvals~1history"
+  /api/approvals/{id}/decision:
+    $ref: "./approvals.yaml#/paths/~1api~1approvals~1{id}~1decision"
+
+  /api/documents/{requestId}/pdf:
+    $ref: "./documents.yaml#/paths/~1api~1documents~1{requestId}~1pdf"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: "./common.yaml#/components/securitySchemes/bearerAuth"

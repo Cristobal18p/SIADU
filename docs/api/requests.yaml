@@ -1,0 +1,264 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Solicitudes de Trámites
+  description: |
+    Envío de formularios completados por solicitantes, consulta de historial y seguimiento
+    de la línea de tiempo de resoluciones.
+    Todos los payloads utilizan estrictamente la convención **`camelCase`**.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Requests
+    description: Creación y seguimiento de solicitudes estudiantiles, docentes y administrativas
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/requests:
+    post:
+      tags: [Requests]
+      operationId: createRequest
+      summary: Enviar formulario completado (Crear solicitud)
+      description: |
+        El solicitante envía las respuestas del formulario web (`datosJson`).
+        El cliente envía únicamente `idVersion`: la versión identifica a la plantilla, su formulario, su diseño
+        y su flujo de aprobación, y es la que se guarda en la solicitud (`solicitudes.id_version`).
+        El backend valida que la versión esté `ACTIVO` y que las variables requeridas estén completas, e inicializa
+        el primer paso en la tabla `aprobaciones`. Como solo se publican versiones con flujo, una versión `ACTIVO`
+        siempre tiene al menos un paso.
+
+        **Quién puede solicitar:** solo plantillas de su unidad cuya `audiencia` incluya alguno de sus estamentos; si la
+        versión no existe o no le corresponde responde `404`. Una versión que le corresponde pero ya no está `ACTIVO`
+        (se publicó otra o se desactivó) responde `409`. No se impide que un aprobador solicite un
+        trámite en cuyo flujo participa.
+
+        **Datos que fija el servidor:** la ruta de aprobación de la solicitud (`solicitudes.id_flujo`) es el flujo de la
+        versión, y su unidad (`solicitudes.cod_unidad`) es la de la plantilla: la unidad a la que pertenece el trámite.
+        Solo la ve el personal de esa unidad que pasa por el flujo. Los pasos `ESCUELA_SOLICITANTE` del flujo se resuelven al radicar: el backend toma al titular de
+        ese cargo en la escuela de la carrera del solicitante y la ruta de la solicitud (`PasoDocumento`) queda con esa
+        persona, de modo que cada estudiante llega al director de su escuela. Si la escuela no tiene un titular que
+        pueda aprobar, responde `409` (`APROBADOR_INVALIDO`) y no se crea la solicitud.
+        Si el titular del primer paso ya no puede aprobar
+        (cuenta inactiva o sin rol `APROBADOR`), responde `409` (`APROBADOR_INVALIDO`) y no se crea la solicitud.
+        El código documental (`UP{código de la unidad, 2 dígitos}-{año}-{número de 4 dígitos}`; el número reinicia cada año por unidad)
+        lo genera la base de datos al insertar la solicitud (trigger); el cliente nunca lo envía.
+        Al radicar, el backend resuelve las variables automáticas (`VariablesSistema`) con los datos del solicitante
+        en ese momento y las congela en `solicitudes.datos_json` bajo la clave reservada `_sistema` (sin cambios de
+        esquema). `datosJson` no puede traer claves que empiecen con `_` (`400`).
+        Las claves que no son variables de la versión (ni el `{id}Otro` de un `select` con `opcionOtro`) se descartan.
+        Si la versión ya no está activa (se publicó una nueva mientras el usuario llenaba el formulario),
+        responde `409` para que el cliente recargue el catálogo.
+        En el `400`, cada elemento de `detalles` trae en `campo` el `id` de la variable incorrecta, sin prefijos.
+      x-roles: [SOLICITANTE]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idVersion, datosJson]
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión activa de la plantilla que se respondió (`idVersion` del catálogo)
+                  example: 12
+                datosJson:
+                  type: object
+                  description: Mapa clave-valor con las respuestas recolectadas del formulario web
+                  example:
+                    codigoAsignatura: "INF-204 Base de Datos I"
+                    motivoRetiro: "LABORAL"
+                    justificacion: "Cambio de turno en la empresa que coincide con el horario del laboratorio."
+      responses:
+        "201":
+          description: Solicitud registrada e ingresada al flujo de aprobación
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idSolicitud, codigoDocumento, estado, fechaCreacion, mensaje]
+                properties:
+                  idSolicitud:     { type: integer, example: 101 }
+                  codigoDocumento: { type: string, example: "UP24-2026-0001" }
+                  estado:          { $ref: "./common.yaml#/components/schemas/EstadoSolicitud" }
+                  fechaCreacion:   { type: string, format: date-time, example: "2026-10-06T13:30:00Z" }
+                  mensaje:         { type: string, example: "Su solicitud ha sido enviada con éxito al Director/a de Escuela." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/requests/me:
+    get:
+      tags: [Requests]
+      operationId: listMyRequests
+      summary: Historial de trámites del usuario autenticado
+      description: |
+        Lista las solicitudes enviadas por el usuario en sesión, con su estado y la fecha de resolución. Es una lista
+        personal: se devuelve como arreglo plano, ordenada de la más reciente a la más antigua.
+        `resolucion` solo viene en solicitudes `APROBADO` o `RECHAZADO`, con el cargo y la persona tal como quedaron al
+        decidir; mientras está `PENDIENTE` vale `null`.
+        El paso en curso y la ruta de aprobación se consultan en el detalle (`/api/requests/{id}`).
+        Todo usuario activo tiene el rol `SOLICITANTE`, incluidos aprobadores y administradores.
+      x-roles: [SOLICITANTE]
+      responses:
+        "200":
+          description: Listado de trámites enviados por el solicitante
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [idSolicitud, codigoDocumento, nombrePlantilla, estado, fechaCreacion, resolucion]
+                  properties:
+                    idSolicitud:     { type: integer, example: 101 }
+                    codigoDocumento: { type: string, example: "UP24-2026-0001" }
+                    nombrePlantilla: { type: string, example: "Solicitud de Retiro de Asignatura" }
+                    estado:          { $ref: "./common.yaml#/components/schemas/EstadoSolicitud" }
+                    fechaCreacion:   { type: string, format: date-time, example: "2026-10-06T13:30:00Z" }
+                    resolucion:
+                      type: object
+                      nullable: true
+                      description: Cargo que aprobó o rechazó el trámite; `null` mientras esté `PENDIENTE`
+                      allOf:
+                        - $ref: "./common.yaml#/components/schemas/ResolucionResumen"
+                    motivoRechazo:
+                      type: string
+                      nullable: true
+                      description: Comentario de la autoridad que rechazó la solicitud; `null` si no está `RECHAZADO`
+                      example: "La justificación no cumple con el reglamento académico."
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+
+  /api/requests/{id}:
+    get:
+      tags: [Requests]
+      operationId: getRequest
+      summary: Detalle y línea de tiempo de una solicitud (Revisión y Seguimiento)
+      description: |
+        Retorna la ficha del solicitante, metadatos del trámite, respuestas del formulario y
+        la línea de tiempo secuencial.
+        Incluye además todo lo necesario para que el **cliente arme la vista previa** del oficio
+        (`variableFormJson` y `disenoFormJson` de la versión con la que se radicó la solicitud, y la firma
+        de cada paso ya aprobado). Disponible para el aprobador en cualquier paso, incluso si otros cargos ya aprobaron.
+        Para la vista previa se usan `variablesSistema` (valores congelados al radicar) y `pasosDocumento` (todos los
+        pasos del flujo, alcanzados o no, con `reqFirma` para armar el bloque de firmas).
+
+        **Historial inmutable:** `pasosDocumento` y `lineaTiempo` salen de la ruta de la solicitud
+        (`solicitudes.id_flujo`, que se fija al radicar y no se migra al publicar versiones nuevas). Los
+        pasos ya decididos muestran el cargo, el área y la persona que había al decidir; no cambian aunque después
+        cambien el cargo o su titular. Los pasos pendientes y futuros muestran los datos vigentes. Esta vista previa es
+        solo de lectura: el PDF lo descarga únicamente el solicitante (`/api/documents/{requestId}/pdf`).
+        Si la autoridad en sesión es la asignada en el paso actual, retorna `idAprobacionPendiente`
+        para permitir resolver directamente en esta misma pantalla.
+
+
+        **Quién puede abrir una solicitud:**
+        - **Solicitante:** solo las que él mismo envió.
+        - **Aprobador:** solo las que pasaron por su cargo en el flujo de aprobación (la que tiene pendiente y
+          las que ya resolvió). El paso siguiente se crea cuando el anterior aprueba, así que no la ve antes de
+          que le llegue.
+        - **Administrador de plantillas:** su rol solo gestiona plantillas y no da acceso a solicitudes ajenas.
+          Como todo usuario activo es también solicitante, ve únicamente las que él mismo envió.
+
+        Quien no tenga acceso recibe `404`, igual que si la solicitud no existiera.
+      x-roles: [SOLICITANTE, APROBADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador único de la solicitud
+      responses:
+        "200":
+          description: Detalle completo de la solicitud y avance del flujo
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idSolicitud, codigoDocumento, idPlantilla, nombrePlantilla, idVersion, estado, fechaCreacion, solicitante, datosJson, variablesSistema, variableFormJson, disenoFormJson, pasosDocumento, lineaTiempo]
+                properties:
+                  idSolicitud:     { type: integer, example: 101 }
+                  codigoDocumento: { type: string, example: "UP24-2026-0001" }
+                  idPlantilla:     { type: integer, example: 5 }
+                  nombrePlantilla: { type: string, example: "Solicitud de Retiro de Asignatura" }
+                  idVersion:       { type: integer, example: 12 }
+                  estado:          { $ref: "./common.yaml#/components/schemas/EstadoSolicitud" }
+                  fechaCreacion:   { type: string, format: date-time, example: "2026-10-06T13:30:00Z" }
+                  fechaResolucion: { type: string, format: date-time, nullable: true, description: "`null` mientras esté `PENDIENTE`", example: "2026-10-08T10:15:00Z" }
+                  idAprobacionPendiente:
+                    type: integer
+                    nullable: true
+                    description: Presente si el usuario autenticado tiene una resolución pendiente sobre este trámite
+                    example: 45
+                  solicitante:
+                    type: object
+                    required: [idUsuario, nombreCompleto, cedula, correo]
+                    properties:
+                      idUsuario:      { type: integer, example: 8 }
+                      nombreCompleto: { type: string, example: "Alex Demo" }
+                      cedula:         { type: string, example: "9-000-0001" }
+                      correo:         { type: string, example: "alex.demo@up.ac.pa" }
+                      carrera:        { type: string, nullable: true, description: "Descripción de la carrera; `null` si el solicitante no es estudiante", example: "Licenciatura en Ingeniería en Informática" }
+                  datosJson:
+                    type: object
+                    description: Mapa clave-valor con las respuestas registradas, sin las claves reservadas (`_sistema`)
+                    example:
+                      codigoAsignatura: "INF-204 Base de Datos I"
+                      motivoRetiro: "LABORAL"
+                      justificacion: "Cambio de turno en la empresa..."
+                  variablesSistema:
+                    $ref: "./common.yaml#/components/schemas/VariablesSistema"
+                  variableFormJson:
+                    $ref: "./common.yaml#/components/schemas/VariableFormJson"
+                  disenoFormJson:
+                    $ref: "./common.yaml#/components/schemas/DisenoFormJson"
+                  pasosDocumento:
+                    type: array
+                    description: Todos los pasos del flujo de la versión, ordenados por `secuencia`
+                    items:
+                      $ref: "./common.yaml#/components/schemas/PasoDocumento"
+                  lineaTiempo:
+                    type: array
+                    description: |
+                      Pasos ya alcanzados (las aprobaciones se crean a medida que avanza el flujo), ordenados por
+                      `secuencia`. Los pasos futuros solo están en `pasosDocumento`.
+                    items:
+                      type: object
+                      required: [secuencia, nombreCargo, estado]
+                      properties:
+                        secuencia:   { type: integer, example: 1 }
+                        nombreCargo: { type: string, example: "Director/a de Escuela" }
+                        titular:     { type: string, nullable: true, example: "Dra. Lia Muestra" }
+                        estado:      { $ref: "./common.yaml#/components/schemas/EstadoAprobacion" }
+                        fechaAccion: { type: string, format: date-time, nullable: true, example: "2026-10-06T15:00:00Z" }
+                        comentario:  { type: string, nullable: true, example: "Cumple con el reglamento académico." }
+                        firmaUrl:    { type: string, nullable: true, description: "URL firmada y temporal de la firma del titular (Storage privado); solo en pasos aprobados con `reqFirma`. Caduca: no se guarda", example: "https://proyecto.supabase.co/storage/v1/object/sign/firmas/12/20261015.png?token=..." }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,0 +1,33 @@
+{
+  "name": "siadu-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mocks": "vite --mode mocks",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tiptap/core": "^3.32.2",
+    "@tiptap/extension-table": "^3.32.2",
+    "@tiptap/extension-text-align": "^3.32.2",
+    "@tiptap/extension-text-style": "^3.32.2",
+    "@tiptap/extensions": "^3.32.2",
+    "@tiptap/pm": "^3.32.2",
+    "@tiptap/react": "^3.32.2",
+    "@tiptap/starter-kit": "^3.32.2",
+    "axios": "^1.7.9",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^7.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.3.3",
+    "vite": "^6.2.0"
+  }
+}

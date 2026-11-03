@@ -1,0 +1,39 @@
+model Usuario {
+  idUsuario     BigInt        @id @default(autoincrement()) @map("id_usuario")
+  correo        String        @unique @db.VarChar(150)
+  cedula        String        @unique @db.VarChar(30)
+  passwordHash  String        @map("password_hash") @db.VarChar(255)
+  claveInicial  Boolean       @default(true) @map("clave_inicial") // true mientras tenga la contraseña inicial
+  versionSesion Int           @default(0) @map("version_sesion") // va en el token; al subirla se revocan las sesiones
+  estado        String        @default("A") @db.Char(1)
+  fechaCreacion DateTime      @default(now()) @map("fecha_creacion") @db.Timestamptz
+  ultimoAcceso  DateTime?     @map("ultimo_acceso") @db.Timestamptz
+
+  rolesUsuario     UsuarioRol[]
+  personal         Personal?
+  estudiante       Estudiante?
+  versionesCreadas Version[]
+  solicitudes      Solicitud[]
+  aprobaciones     Aprobacion[]
+
+  @@map("usuarios")
+}
+
+model Rol {
+  idRol         BigInt        @id @default(autoincrement()) @map("id_rol")
+  descripcion   String        @unique @db.VarChar(100)
+  usuariosRoles UsuarioRol[]
+
+  @@map("roles")
+}
+
+model UsuarioRol {
+  idUsuario     BigInt        @map("id_usuario")
+  idRol         BigInt        @map("id_rol")
+
+  usuario       Usuario       @relation(fields: [idUsuario], references: [idUsuario], onDelete: Cascade)
+  rol           Rol           @relation(fields: [idRol], references: [idRol], onDelete: Cascade)
+
+  @@id([idUsuario, idRol])
+  @@map("usuarios_roles")
+}

@@ -1,0 +1,11 @@
+{
+  "name": "siadu-api-docs",
+  "version": "2.12.0",
+  "private": true,
+  "description": "Herramientas del contrato de API (solo desarrollo; no forman parte de la aplicación)",
+  "scripts": {
+    "bundle": "npx @redocly/cli bundle openapi.root.yaml --config redocly.yaml -o openapi.yaml",
+    "lint": "npx @redocly/cli lint common.yaml auth.yaml catalogs.yaml templates.yaml requests.yaml approvals.yaml documents.yaml openapi.yaml --config redocly.yaml",
+    "mock": "npx @stoplight/prism-cli mock openapi.yaml --port 4010 --dynamic"
+  }
+}

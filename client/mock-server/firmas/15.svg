@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="70" viewBox="0 0 200 70">
+  <!-- Firma de prueba de los mocks (asignación 15) -->
+  <path d="M12 50 Q 35 5, 55 45 T 100 40 Q 125 15, 145 50 T 190 30" fill="none" stroke="#1e3a8a" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

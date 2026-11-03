@@ -1,0 +1,3129 @@
+openapi: 3.0.3
+info:
+  title: SIADU — API Oficial Completa
+  description: |
+    Especificación unificada OpenAPI 3.0 para el Sistema Integral de Automatización de Documentos Universitarios (SIADU).
+    Universidad de Panamá — Facultad de Informática, Electrónica y Comunicación (FIEC).
+    Todos los datos en peticiones y respuestas utilizan estrictamente la convención **`camelCase`**.
+
+    Este archivo se **genera** a partir de los módulos de `docs/api` (`auth`, `catalogs`, `templates`, `requests`,
+    `approvals`, `documents`) y de `common.yaml`. Los cambios se hacen en los módulos, nunca aquí.
+
+    **Límites:** cualquier endpoint puede responder `429` `DEMASIADAS_SOLICITUDES` (300 peticiones por minuto por
+    usuario); el login y el PDF tienen límites propios (ver cada operación).
+  version: 2.12.0
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+    description: Autenticación con JWT (cédula / @up.ac.pa) y perfil de usuario
+  - name: Catalogs
+    description: Catálogos de cargos, autoridades y áreas institucionales
+  - name: Flows
+    description: Flujos secuenciales de aprobación reutilizables por unidad
+  - name: Templates
+    description: Inventario administrativo paginado, constructor TipTap y catálogo de trámites
+  - name: Requests
+    description: Envío de solicitudes, historial del solicitante y línea de tiempo
+  - name: Approvals
+    description: Bandeja de entrada de autoridades y resoluciones (Aprobado / Rechazado)
+  - name: Documents
+    description: Generación de PDF oficial a 300 DPI (Puppeteer). La vista previa se arma en el cliente
+paths:
+  /api/auth/login:
+    post:
+      tags:
+        - Auth
+      operationId: login
+      summary: Iniciar sesión institucional
+      description: |
+        Valida las credenciales institucionales contra la base de datos (con hash `bcrypt`).
+        Actualiza de forma auditada el campo `ultimo_acceso` en la tabla `usuarios`.
+        `debeCambiarPassword` se lee de `usuarios.clave_inicial`.
+
+        **Cuenta y perfil activos:** el acceso exige `usuarios.estado = A` y que el usuario pertenezca al `estamento`
+        elegido con su perfil activo (la persona y su registro de estudiante, profesor o administrativo con estado `A`).
+        Una cuenta sin perfil en ese estamento, o con la persona inactiva, recibe `401` `CREDENCIALES_INVALIDAS`.
+        Si `usuario.debeCambiarPassword` es `true`, el cliente muestra la pantalla de cambio de contraseña antes
+        de cualquier otra.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - identificador
+                - password
+                - estamento
+              properties:
+                identificador:
+                  type: string
+                  description: Cédula personal o correo institucional
+                  example: 9-000-0001
+                password:
+                  type: string
+                  format: password
+                  description: Contraseña del usuario
+                  example: Demo2026*
+                estamento:
+                  description: Estamento institucional seleccionado en el selector de acceso
+                  allOf:
+                    - $ref: '#/components/schemas/Estamento'
+                  example: ESTUDIANTE
+      responses:
+        '200':
+          description: Autenticación exitosa. Retorna token JWT y perfil básico.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - token
+                  - usuario
+                properties:
+                  token:
+                    type: string
+                    description: |
+                      JWT HS256 firmado con `JWT_SECRET`. Su vida es configurable con la variable `EXPIRESIN`
+                      (nunca menos de 2 horas); si no se define, dura 8 horas. No hay renovación: al vencer,
+                      cualquier endpoint responde `401` y el cliente cierra la sesión.
+                    example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                  usuario:
+                    type: object
+                    required:
+                      - idUsuario
+                      - correo
+                      - cedula
+                      - nombreCompleto
+                      - roles
+                      - estamentos
+                      - debeCambiarPassword
+                    properties:
+                      idUsuario:
+                        type: integer
+                        example: 1
+                      correo:
+                        type: string
+                        format: email
+                        example: alex.demo@up.ac.pa
+                      cedula:
+                        type: string
+                        description: Cédula del usuario (obligatoria)
+                        example: 9-000-0001
+                      nombreCompleto:
+                        type: string
+                        example: Alex Demo
+                      roles:
+                        type: array
+                        description: Privilegios de sistema para navegación y guardas de rutas
+                        items:
+                          $ref: '#/components/schemas/RolSistema'
+                        example:
+                          - SOLICITANTE
+                      estamentos:
+                        type: array
+                        description: Estamentos a los que pertenece el usuario
+                        items:
+                          $ref: '#/components/schemas/Estamento'
+                        example:
+                          - ESTUDIANTE
+                      codUnidad:
+                        type: integer
+                        description: Código de la unidad académica a la que pertenece el usuario
+                        example: 24
+                      debeCambiarPassword:
+                        type: boolean
+                        description: '`true` mientras la cuenta tenga la contraseña inicial: debe cambiarla antes de usar el sistema'
+                        example: false
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          description: Credenciales no válidas o acceso no autorizado para el portal seleccionado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  codigo: CREDENCIALES_INVALIDAS
+                  mensaje: Credenciales de acceso incorrectas o cuenta no autorizada.
+        '429':
+          description: |
+            Demasiados intentos fallidos. Tras 8 intentos fallidos de la misma cuenta desde la misma IP (o 100 desde
+            una IP) en 15 minutos, el servidor rechaza los siguientes. La respuesta trae `Retry-After` (segundos).
+          headers:
+            Retry-After:
+              description: Segundos que debe esperar el cliente antes de volver a intentar
+              schema:
+                type: integer
+                example: 600
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  codigo: DEMASIADOS_INTENTOS
+                  mensaje: Demasiados intentos fallidos. Espere unos minutos e intente de nuevo.
+  /api/auth/logout:
+    post:
+      tags:
+        - Auth
+      operationId: logout
+      summary: Cerrar sesión
+      description: |
+        Cierra **todas** las sesiones del usuario: el servidor incrementa su `version_sesion` y cualquier token
+        emitido antes (en este u otro dispositivo) responde `401` `NO_AUTENTICADO` desde ese momento. El cliente
+        siempre descarta el token localmente.
+
+        **Cómo se revoca:** el token lleva el claim `vs` (versión de sesión). En cada petición el servidor lo
+        compara con `usuarios.version_sesion`; si no coincide, el token ya no vale. Un token sin `vs` cuenta como 0.
+      x-roles:
+        - SOLICITANTE
+        - APROBADOR
+        - ADMINISTRADOR
+      responses:
+        '200':
+          description: Sesión cerrada
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - mensaje
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: Sesión finalizada exitosamente.
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+  /api/auth/password:
+    post:
+      tags:
+        - Auth
+      operationId: changePassword
+      summary: Cambiar la contraseña del usuario en sesión
+      description: |
+        Cambia la contraseña del usuario autenticado. Es obligatorio en el primer acceso
+        (`debeCambiarPassword: true`) y al terminar el indicador queda en `false`.
+
+        **Política de la contraseña nueva:** de 8 a 64 caracteres, con al menos una mayúscula, una minúscula,
+        un número y un símbolo, y distinta de la actual. Se guarda con hash `bcrypt`.
+
+        Errores de validación (`400`):
+        - `PASSWORD_ACTUAL_INCORRECTA`: la contraseña actual no coincide (`detalles[].campo = passwordActual`).
+          No se usa `401` para no cerrar la sesión del cliente.
+        - `VALIDACION_FALLIDA`: la nueva no cumple la política (`detalles[].campo = passwordNueva`).
+      x-roles:
+        - SOLICITANTE
+        - APROBADOR
+        - ADMINISTRADOR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - passwordActual
+                - passwordNueva
+              properties:
+                passwordActual:
+                  type: string
+                  format: password
+                  description: Contraseña vigente (la inicial, en el primer acceso)
+                  example: Demo2026*
+                passwordNueva:
+                  type: string
+                  format: password
+                  minLength: 8
+                  maxLength: 64
+                  example: Fiec#2026seguro
+      responses:
+        '200':
+          description: |
+            Contraseña cambiada; `debeCambiarPassword` queda en `false`. Las demás sesiones del usuario quedan
+            revocadas y la respuesta trae un `token` nuevo para esta: el cliente debe guardarlo en lugar del anterior.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - mensaje
+                  - token
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mensaje:
+                    type: string
+                    example: Contraseña actualizada correctamente.
+                  token:
+                    type: string
+                    description: JWT nuevo de esta sesión
+                    example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '400':
+          description: La contraseña actual no coincide o la nueva no cumple la política
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  codigo: PASSWORD_ACTUAL_INCORRECTA
+                  mensaje: La contraseña actual no es correcta.
+                  detalles:
+                    - campo: passwordActual
+                      mensaje: La contraseña actual no es correcta.
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+  /api/auth/me:
+    get:
+      tags:
+        - Auth
+      operationId: getMe
+      summary: Obtener perfil completo del usuario autenticado
+      description: |
+        Devuelve el contexto completo del usuario: datos de contacto, unidad académica,
+        carrera (estudiante) y cargos vigentes (administrativo/autoridad). Los profesores se identifican por su unidad:
+        la base no registra departamentos de profesores.
+        Todo usuario activo incluye el rol `SOLICITANTE` en `roles`, además de `APROBADOR` o `ADMINISTRADOR` si los tiene.
+      x-roles:
+        - SOLICITANTE
+        - APROBADOR
+        - ADMINISTRADOR
+      responses:
+        '200':
+          description: Perfil detallado del usuario en sesión
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idUsuario
+                  - correo
+                  - cedula
+                  - nombreCompleto
+                  - nombre
+                  - apellido
+                  - ultimoAcceso
+                  - roles
+                  - estamentos
+                  - unidad
+                  - debeCambiarPassword
+                properties:
+                  idUsuario:
+                    type: integer
+                    example: 1
+                  correo:
+                    type: string
+                    format: email
+                    example: alex.demo@up.ac.pa
+                  cedula:
+                    type: string
+                    description: Cédula del usuario (obligatoria)
+                    example: 9-000-0001
+                  nombre:
+                    type: string
+                    example: Alex
+                  apellido:
+                    type: string
+                    example: Demo
+                  nombreCompleto:
+                    type: string
+                    description: Nombre y apellido tal como se muestran en la interfaz
+                    example: Alex Demo
+                  ultimoAcceso:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: |
+                      Fecha del inicio de sesión anterior al actual; `null` en el primer acceso.
+                      El campo siempre está presente. Su valor no cambia mientras dure la sesión
+                      (hasta el siguiente login), aunque `/auth/me` se consulte varias veces.
+                    example: '2026-10-05T16:30:00Z'
+                  debeCambiarPassword:
+                    type: boolean
+                    description: |
+                      `true` mientras la cuenta tenga la contraseña inicial. El cliente muestra la pantalla de cambio
+                      de contraseña y no deja usar el resto del sistema hasta cambiarla (`POST /api/auth/password`).
+                    example: false
+                  roles:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RolSistema'
+                    example:
+                      - SOLICITANTE
+                  estamentos:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Estamento'
+                    example:
+                      - ESTUDIANTE
+                  unidad:
+                    description: Unidad académica a la que pertenece el usuario (estudiante, profesor o administrativo); siempre presente
+                    allOf:
+                      - $ref: '#/components/schemas/UnidadResumen'
+                  carrera:
+                    type: object
+                    nullable: true
+                    description: Presente para estudiantes; `null` en los demás
+                    allOf:
+                      - $ref: '#/components/schemas/CarreraResumen'
+                  cargos:
+                    type: array
+                    description: |
+                      Cargos y asignaciones administrativas vigentes del usuario, del cargo mayor al menor. En cada uno, `titularActual` es el propio
+                      usuario, `idUsuarioTitular` su `idUsuario` y `esAprobador` indica si tiene el rol `APROBADOR`.
+                    items:
+                      $ref: '#/components/schemas/CargoResumen'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+  /api/catalogs/cargos:
+    get:
+      tags:
+        - Catalogs
+      operationId: listCargos
+      summary: Obtener cargos vigentes con sus titulares actuales
+      description: |
+        Retorna la lista de cargos y autoridades asignadas en la unidad para configurar flujos o mostrar firmas.
+        Con `soloAprobadores=true` devuelve únicamente los cargos cuyo titular puede ser aprobador
+        (`esAprobador: true`); el constructor de flujos siempre lo envía así.
+
+        Solo incluye los cargos de autoridad de la unidad: Decano/a, Vicedecano/a, Director/a de Escuela, Director/a de
+        Departamento, la Secretaría Administrativa y las secretarias de cada director. Las que tienen escuela
+        (`escuela` distinto de `null`) permiten un paso `ESCUELA_SOLICITANTE` del flujo, que resuelve al titular según
+        la carrera del solicitante.
+      x-roles:
+        - SOLICITANTE
+        - APROBADOR
+        - ADMINISTRADOR
+      parameters:
+        - in: query
+          name: codUnidad
+          required: false
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica. Solo se admite la unidad del usuario (si se omite, se deduce del token JWT); otra unidad responde `403`
+        - in: query
+          name: soloAprobadores
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Si es `true`, solo cargos con titular con cuenta activa y rol `APROBADOR`
+      responses:
+        '200':
+          description: Lista de cargos y titulares disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CargoResumen'
+              example:
+                - idAsignacion: 12
+                  idCargo: 14
+                  nombreCargo: Director/a de Escuela
+                  titularActual: Dra. Lia Muestra
+                  idUsuarioTitular: 31
+                  area: Escuela de Ingeniería Informática
+                  escuela: Escuela de Ingeniería Informática
+                  esAprobador: true
+                - idAsignacion: 1
+                  idCargo: 1
+                  nombreCargo: Decano
+                  titularActual: Dr. Julio Demo
+                  idUsuarioTitular: null
+                  area: Decanato
+                  escuela: null
+                  esAprobador: false
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+  /api/flows:
+    get:
+      tags:
+        - Flows
+      operationId: listFlows
+      summary: Listar flujos de aprobación reutilizables de la unidad
+      description: |
+        Consulta los flujos `ACTIVO` de la unidad académica del administrador, los que se pueden reutilizar al
+        armar una plantilla. Los flujos en `BORRADOR` no aparecen: pertenecen a una versión de plantilla en edición.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: query
+          name: codUnidad
+          required: false
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        '200':
+          description: Lista de flujos de aprobación disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - idFlujo
+                    - nombre
+                    - codigo
+                    - totalPasos
+                    - pasosResumen
+                  properties:
+                    idFlujo:
+                      type: integer
+                      example: 1
+                    nombre:
+                      type: string
+                      example: Aprobación Estándar FIEC (Escuela + Decanato)
+                    codigo:
+                      type: string
+                      example: FLUJO-FIEC-ESC-DEC
+                    totalPasos:
+                      type: integer
+                      example: 2
+                    pasosResumen:
+                      type: array
+                      items:
+                        type: string
+                      description: Nombre del cargo de cada paso, en orden; un paso por escuela lleva el sufijo « (del solicitante)»
+                      example:
+                        - Director/a de Escuela (del solicitante)
+                        - Decano/a
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags:
+        - Flows
+      operationId: createFlow
+      summary: Crear un nuevo flujo de aprobación (en borrador)
+      description: |
+        Registra una cadena secuencial de firmas en estado `BORRADOR`. Pasa a `ACTIVO` y queda reutilizable cuando se
+        publica la plantilla que lo usa. Para cambiar la estructura de un flujo `ACTIVO` se crea un flujo nuevo con
+        este endpoint (el cliente puede partir de los pasos del existente).
+
+        Los pasos llevan secuencias únicas y consecutivas desde 1. Un paso `FIJO` lleva `idAsignacion`, que debe ser
+        una asignación vigente de la unidad (`400` si no). Un paso `ESCUELA_SOLICITANTE` lleva `idCargo` (un cargo con
+        escuela, `CargoResumen.escuela`) y no `idAsignacion`: el titular se resuelve al radicar según la escuela de la
+        carrera del solicitante (ver `PasoFlujo`). Las reglas de aprobador y de personas distintas de abajo se aplican
+        a los pasos `FIJO`; en los de escuela se comprueban al publicar y al radicar, con el titular de cada escuela.
+        Un paso mal formado responde `400` (`VALIDACION_FALLIDA`): `FIJO` sin `idAsignacion`, `ESCUELA_SOLICITANTE` sin
+        `idCargo` o con un cargo que no tiene escuela (`detalles[].campo = pasos[i].idCargo`), un paso con ambos
+        identificadores, o el mismo cargo por escuela repetido en el flujo. El `codigo` es único: `409` (`CONFLICTO_ESTADO`) si ya existe.
+
+        **Solo aprobadores:** el titular de cada asignación debe tener cuenta activa y el rol `APROBADOR`
+        (`CargoResumen.esAprobador`). Si no, `400` (`APROBADOR_INVALIDO`) con `detalles[].campo = pasos[i].idAsignacion`
+        en el paso afectado.
+
+        **Personas distintas (estricto):** cada persona aparece una sola vez en el flujo. No se puede repetir el
+        `idAsignacion` ni el titular de la asignación (`idUsuarioTitular` de `CargoResumen`), aunque sean cargos
+        distintos de la misma persona. Si se repite, `400` (`VALIDACION_FALLIDA`) con
+        `detalles[].campo = pasos[i].idAsignacion` en el paso repetido. La regla se vuelve a comprobar al **publicar**
+        una plantilla con el flujo (`409` si un cambio de titulares dejó a una persona en dos pasos).
+
+        **Orden estricto:** las aprobaciones siguen el orden de `secuencia`. El paso siguiente se crea solo cuando
+        el anterior aprueba; nadie resuelve un paso que no le corresponde ni antes de su turno, y un rechazo cierra
+        la solicitud.
+      x-roles:
+        - ADMINISTRADOR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nombre
+                - codigo
+                - codUnidad
+                - pasos
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 150
+                  example: Aprobación Consejo de Facultad
+                codigo:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+                  description: Único. Alfanumérico con guiones
+                  example: FLUJO-FIEC-CONSEJO
+                descripcion:
+                  type: string
+                  example: Flujo que pasa por Escuela y Decanato
+                codUnidad:
+                  type: integer
+                  description: Unidad del administrador; con otra responde `403`
+                  example: 24
+                pasos:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: '#/components/schemas/PasoFlujo'
+      responses:
+        '201':
+          description: Flujo creado en borrador
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idFlujo
+                  - codigo
+                  - estado
+                  - totalPasos
+                  - mensaje
+                properties:
+                  idFlujo:
+                    type: integer
+                    example: 2
+                  codigo:
+                    type: string
+                    example: FLUJO-FIEC-CONSEJO
+                  estado:
+                    $ref: '#/components/schemas/EstadoFlujo'
+                  totalPasos:
+                    type: integer
+                    example: 2
+                  mensaje:
+                    type: string
+                    example: Flujo creado exitosamente.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/flows/{id}:
+    get:
+      tags:
+        - Flows
+      operationId: getFlow
+      summary: Detalle de un flujo de aprobación
+      description: |
+        Devuelve el estado y los pasos del flujo con su `idAsignacion`, cargo y titular. Permite reutilizar un flujo
+        existente en el constructor y mostrar su cadena completa.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador del flujo
+      responses:
+        '200':
+          description: Flujo con sus pasos ordenados por `secuencia`
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idFlujo
+                  - nombre
+                  - codigo
+                  - estado
+                  - codUnidad
+                  - pasos
+                properties:
+                  idFlujo:
+                    type: integer
+                    example: 1
+                  nombre:
+                    type: string
+                    example: Aprobación Estándar FIEC (Escuela + Decanato)
+                  codigo:
+                    type: string
+                    example: FLUJO-FIEC-ESC-DEC
+                  estado:
+                    $ref: '#/components/schemas/EstadoFlujo'
+                  descripcion:
+                    type: string
+                    nullable: true
+                    example: Flujo que pasa por Escuela y Decanato
+                  codUnidad:
+                    type: integer
+                    example: 24
+                  pasos:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PasoFlujo'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags:
+        - Flows
+      operationId: updateFlow
+      summary: Editar un flujo en borrador
+      description: |
+        Reemplaza el nombre, la descripción y **todos** los pasos de un flujo en `BORRADOR`. El `codigo` y la
+        `codUnidad` no se pueden cambiar. Aplican las mismas validaciones que al crear (secuencias consecutivas,
+        asignaciones vigentes de la unidad, solo aprobadores, personas distintas).
+
+        Un flujo `ACTIVO` no se edita: responde `409` (`CONFLICTO_ESTADO`) y hay que crear otro flujo.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador del flujo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nombre
+                - pasos
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 150
+                  example: Aprobación Consejo de Facultad (revisada)
+                descripcion:
+                  type: string
+                  nullable: true
+                  example: Flujo que pasa por Escuela, Vicedecanato y Decanato
+                pasos:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: '#/components/schemas/PasoFlujo'
+      responses:
+        '200':
+          description: Flujo en borrador actualizado
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idFlujo
+                  - codigo
+                  - estado
+                  - totalPasos
+                  - mensaje
+                properties:
+                  idFlujo:
+                    type: integer
+                    example: 2
+                  codigo:
+                    type: string
+                    example: FLUJO-FIEC-CONSEJO
+                  estado:
+                    $ref: '#/components/schemas/EstadoFlujo'
+                  totalPasos:
+                    type: integer
+                    example: 3
+                  mensaje:
+                    type: string
+                    example: Flujo actualizado exitosamente.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/templates:
+    get:
+      tags:
+        - Templates
+      operationId: listTemplates
+      summary: Inventario de plantillas para administradores (Paginado)
+      description: |
+        Lista todas las plantillas registradas en la unidad con sus estados (`ACTIVO`, `BORRADOR`, `INACTIVO`),
+        ordenadas por `fechaActualizacion` de la más reciente a la más antigua.
+        Incluye paginación eficiente para evitar transferencias excesivas de datos.
+        Cada plantilla se lista una sola vez con su versión vigente (la `ACTIVO`; si no hay, la de mayor número).
+        Para los indicadores por estado del panel de inicio use `GET /api/templates/summary`, que los devuelve en una
+        sola llamada. (Consultar con `estado=ACTIVO|BORRADOR|INACTIVO` y `limit=1` y leer `total` da los mismos números.)
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Número de página actual
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+          description: Cantidad de plantillas por página
+        - in: query
+          name: estado
+          schema:
+            type: string
+            default: TODOS
+            enum:
+              - TODOS
+              - ACTIVO
+              - BORRADOR
+              - INACTIVO
+          description: Filtrar por el estado de la versión vigente (la `ACTIVO`; si no hay, la de mayor número)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Búsqueda textual por nombre o descripción de la plantilla
+        - in: query
+          name: codUnidad
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        '200':
+          description: Lista paginada de plantillas para el panel de administración
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - total
+                  - pagina
+                  - limite
+                  - totalPaginas
+                  - datos
+                properties:
+                  total:
+                    type: integer
+                    example: 15
+                  pagina:
+                    type: integer
+                    example: 1
+                  limite:
+                    type: integer
+                    example: 10
+                  totalPaginas:
+                    type: integer
+                    example: 2
+                  datos:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - idPlantilla
+                        - nombre
+                        - audiencia
+                        - numeroVersion
+                        - estadoVersion
+                        - fechaActualizacion
+                      properties:
+                        idPlantilla:
+                          type: integer
+                          example: 5
+                        nombre:
+                          type: string
+                          example: Solicitud de Retiro de Asignatura
+                        descripcion:
+                          type: string
+                          nullable: true
+                          example: Trámite de retiro formal de materias en la FIEC
+                        codUnidad:
+                          type: integer
+                          example: 24
+                        audiencia:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/Estamento'
+                          example:
+                            - ESTUDIANTE
+                        numeroVersion:
+                          type: integer
+                          description: Número de la versión listada, la misma a la que corresponde `estadoVersion`
+                          example: 2
+                        estadoVersion:
+                          $ref: '#/components/schemas/EstadoVersion'
+                        idVersionBorrador:
+                          type: integer
+                          nullable: true
+                          description: |
+                            Versión en `BORRADOR` de la plantilla, si existe. Cuando la listada es `ACTIVO` y ya hay un
+                            borrador en curso, permite abrir ese borrador en lugar de crear una versión nueva.
+                          example: 14
+                        fechaActualizacion:
+                          type: string
+                          format: date-time
+                          description: |
+                            Fecha de publicación de la versión; si no se ha publicado, la fecha de registro de la plantilla.
+                            No refleja la última edición de un borrador: la base de datos no la guarda.
+                          example: '2026-10-05T14:20:00Z'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags:
+        - Templates
+      operationId: createTemplate
+      summary: Crear nueva plantilla con versión inicial (Borrador)
+      description: |
+        Crea la cabecera de la plantilla y su primera versión en estado `BORRADOR`.
+        La transacción atómica se realiza de forma segura mediante Prisma.
+        Un borrador puede guardarse incompleto: `variableFormJson` con `variables: []`, un `cuerpoDocumento`
+        mínimo y sin `idFlujo`. Las exigencias del documento y del flujo se verifican al publicar.
+      x-roles:
+        - ADMINISTRADOR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nombre
+                - codUnidad
+                - audiencia
+                - variableFormJson
+                - disenoFormJson
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  example: Solicitud de Reclamo de Calificación
+                descripcion:
+                  type: string
+                  nullable: true
+                  example: Reclamos sobre calificaciones de exámenes parciales o finales
+                codUnidad:
+                  type: integer
+                  description: Unidad del administrador; con otra responde `403`
+                  example: 24
+                audiencia:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items:
+                    $ref: '#/components/schemas/Estamento'
+                  example:
+                    - ESTUDIANTE
+                idFlujo:
+                  type: integer
+                  nullable: true
+                  description: Flujo `ACTIVO` reutilizable o flujo `BORRADOR` sin dueño de la misma unidad. Opcional en un borrador
+                  example: 1
+                variableFormJson:
+                  $ref: '#/components/schemas/VariableFormJson'
+                disenoFormJson:
+                  $ref: '#/components/schemas/DisenoFormJson'
+      responses:
+        '201':
+          description: Plantilla y versión inicial creadas exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 6
+                  idVersion:
+                    type: integer
+                    example: 13
+                  numeroVersion:
+                    type: integer
+                    example: 1
+                  estado:
+                    type: string
+                    example: BORRADOR
+                  mensaje:
+                    type: string
+                    example: Plantilla creada en borrador exitosamente.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/templates/catalog:
+    get:
+      tags:
+        - Templates
+      operationId: getCatalog
+      summary: Catálogo de trámites disponibles para el solicitante
+      description: |
+        Retorna exclusivamente las plantillas con una versión `ACTIVO` de la unidad (`codUnidad`) del usuario
+        autenticado cuya `audiencia` incluye alguno de sus estamentos (`estamentos`): un estudiante solo ve las
+        dirigidas a estudiantes, un profesor las de profesores y un administrativo las de administrativos; quien
+        tiene dos estamentos ve las de ambos.
+      x-roles:
+        - SOLICITANTE
+      responses:
+        '200':
+          description: Catálogo de trámites que el solicitante puede iniciar
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - idPlantilla
+                    - nombre
+                    - descripcion
+                    - codUnidad
+                    - idVersion
+                  properties:
+                    idPlantilla:
+                      type: integer
+                      example: 5
+                    nombre:
+                      type: string
+                      example: Solicitud de Retiro de Asignatura
+                    descripcion:
+                      type: string
+                      description: Cadena vacía si la plantilla no tiene descripción
+                      example: Permite solicitar el retiro de una o más materias del semestre en curso.
+                    codUnidad:
+                      type: integer
+                      example: 24
+                    idVersion:
+                      type: integer
+                      example: 12
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+  /api/templates/summary:
+    get:
+      tags:
+        - Templates
+      operationId: getTemplatesSummary
+      summary: Resumen de plantillas por estado (indicadores del inicio)
+      description: |
+        Cuenta las plantillas de la unidad según el estado de su **versión vigente** (la `ACTIVO`; si no hay, la de
+        mayor número), con los mismos criterios que el filtro `estado` de `GET /api/templates`: los totales coinciden
+        con el `total` de cada una de esas consultas. Reemplaza las cuatro llamadas que hacía el panel de inicio
+        (`TODOS` y los tres estados con `limit=1`) por una sola.
+
+        - `total`: todas las plantillas de la unidad.
+        - `activas`: la versión vigente está `ACTIVO`.
+        - `borradores`: no hay versión `ACTIVO` y la vigente es un `BORRADOR` (plantilla nunca publicada).
+        - `inactivas`: no hay versión `ACTIVO` ni `BORRADOR`; todas las versiones están `INACTIVO`.
+
+        Una plantilla activa que tiene además un borrador en curso cuenta solo como activa (`GET /api/templates` la
+        informa con `idVersionBorrador`).
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: query
+          name: codUnidad
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        '200':
+          description: Conteo de plantillas por estado
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - total
+                  - activas
+                  - borradores
+                  - inactivas
+                properties:
+                  total:
+                    type: integer
+                    minimum: 0
+                    example: 12
+                  activas:
+                    type: integer
+                    minimum: 0
+                    example: 7
+                  borradores:
+                    type: integer
+                    minimum: 0
+                    example: 3
+                  inactivas:
+                    type: integer
+                    minimum: 0
+                    example: 2
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+  /api/templates/{id}:
+    get:
+      tags:
+        - Templates
+      operationId: getTemplate
+      summary: Cargar plantilla completa (Constructor o Formulario Web)
+      description: |
+        Obtiene la definición integral de la plantilla: diseño TipTap, variables dinámicas
+        del formulario web y el flujo de firmas asociado.
+        Si el usuario es un solicitante, solo puede consultar versiones publicadas (`ACTIVO`) de su unidad cuya
+        `audiencia` incluya alguno de sus estamentos; cualquier otra versión le responde `404`, como si no existiera.
+        Si es administrador, solo las plantillas de su unidad (otra responde `404`).
+        Toda versión `ACTIVO` tiene flujo de aprobación porque no se puede publicar sin él: `flujo` solo
+        es `null` en versiones en `BORRADOR`.
+      x-roles:
+        - ADMINISTRADOR
+        - SOLICITANTE
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador único de la plantilla
+        - in: query
+          name: idVersion
+          required: false
+          schema:
+            type: integer
+          description: |
+            Versión específica a consultar. Si se omite, devuelve la versión `ACTIVO`; si no hay, la de mayor
+            `numeroVersion` (la misma que lista el inventario).
+      responses:
+        '200':
+          description: Plantilla completa con AST TipTap y variables
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idPlantilla
+                  - nombre
+                  - codUnidad
+                  - audiencia
+                  - idVersion
+                  - numeroVersion
+                  - estado
+                  - variableFormJson
+                  - disenoFormJson
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  nombre:
+                    type: string
+                    example: Solicitud de Retiro de Asignatura
+                  descripcion:
+                    type: string
+                    nullable: true
+                    example: Trámite de retiro de asignaturas
+                  codUnidad:
+                    type: integer
+                    example: 24
+                  audiencia:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Estamento'
+                    example:
+                      - ESTUDIANTE
+                  idVersion:
+                    type: integer
+                    example: 12
+                  numeroVersion:
+                    type: integer
+                    example: 1
+                  estado:
+                    $ref: '#/components/schemas/EstadoVersion'
+                  fechaPublicacion:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: '`null` si la versión nunca se publicó'
+                    example: '2026-10-05T14:20:00Z'
+                  versionBorrador:
+                    type: object
+                    nullable: true
+                    description: |
+                      Solo para el administrador: versión en `BORRADOR` de la plantilla, si existe (puede ser la misma
+                      consultada). `null` si no hay borrador. Para un solicitante siempre es `null`.
+                    required:
+                      - idVersion
+                      - numeroVersion
+                    properties:
+                      idVersion:
+                        type: integer
+                        example: 14
+                      numeroVersion:
+                        type: integer
+                        example: 2
+                  variablesSistema:
+                    type: object
+                    nullable: true
+                    description: |
+                      Solo para el **solicitante** (rol SOLICITANTE): los datos automáticos que el documento usaría si
+                      radicara ahora, con sus datos de perfil. Es una vista previa: el backend los vuelve a resolver
+                      y congela al radicar (`POST /api/requests`). El cliente los muestra tal cual, sin calcularlos.
+                      `null` para el administrador o si la versión no es publicada.
+                    allOf:
+                      - $ref: '#/components/schemas/VariablesSistema'
+                  variableFormJson:
+                    $ref: '#/components/schemas/VariableFormJson'
+                  disenoFormJson:
+                    $ref: '#/components/schemas/DisenoFormJson'
+                  flujo:
+                    type: object
+                    nullable: true
+                    description: |
+                      Cadena de aprobación; `null` solo en borradores sin flujo asignado. Los pasos
+                      `ESCUELA_SOLICITANTE` llegan sin resolver al administrador y resueltos con la escuela de la
+                      carrera del usuario cuando lo pide un solicitante (así el bloque de firmas de la vista previa
+                      muestra al director que de verdad firmará su trámite).
+                    required:
+                      - idFlujo
+                      - nombre
+                      - codigo
+                      - estado
+                      - pasos
+                    properties:
+                      idFlujo:
+                        type: integer
+                        example: 1
+                      nombre:
+                        type: string
+                        example: Aprobación Estándar FIEC (Escuela + Decanato)
+                      codigo:
+                        type: string
+                        example: FLUJO-FIEC-ESC-DEC
+                      estado:
+                        $ref: '#/components/schemas/EstadoFlujo'
+                      pasos:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PasoFlujo'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags:
+        - Templates
+      operationId: updateTemplate
+      summary: Guardar cambios en versión en borrador
+      description: |
+        Actualiza el diseño TipTap, las variables y el flujo de una versión en estado `BORRADOR`.
+        No permite modificar versiones que ya se encuentran en estado `ACTIVO` o `INACTIVO`.
+        `codUnidad` se fija al crear la plantilla y no se puede cambiar.
+        `audiencia` se puede cambiar solo mientras la plantilla **nunca se ha publicado** (su única versión es la 1, en
+        `BORRADOR`): si se omite, se conserva. En una plantilla que ya tuvo una versión publicada la audiencia es la de
+        sus solicitudes y versiones anteriores, y enviarla responde `409` (`CONFLICTO_ESTADO`).
+        `idFlujo`: si se omite, la versión conserva su flujo actual; si se envía `null`, se lo quita.
+        El flujo debe ser `ACTIVO` o un `BORRADOR` sin dueño (o ya propio de esta versión) de la misma unidad:
+        `404` si no existe, `400` si es de otra unidad y `409` si es un borrador de otra versión.
+        Se valida que cada variable usada en `cuerpoDocumento` esté definida en `variableFormJson`
+        (y viceversa), que los `id` sean únicos, que un `select` tenga opciones y que `min` no sea mayor que `max`.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - idVersion
+                - variableFormJson
+                - disenoFormJson
+              properties:
+                idVersion:
+                  type: integer
+                  example: 12
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  example: Solicitud de Retiro de Asignatura (Revisada)
+                descripcion:
+                  type: string
+                  nullable: true
+                  example: Descripción actualizada
+                audiencia:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items:
+                    $ref: '#/components/schemas/Estamento'
+                  description: Solo en una plantilla que nunca se ha publicado; si se omite, se conserva
+                  example:
+                    - ESTUDIANTE
+                    - PROFESOR
+                idFlujo:
+                  type: integer
+                  nullable: true
+                  example: 1
+                variableFormJson:
+                  $ref: '#/components/schemas/VariableFormJson'
+                disenoFormJson:
+                  $ref: '#/components/schemas/DisenoFormJson'
+      responses:
+        '200':
+          description: Versión borrador actualizada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  idVersion:
+                    type: integer
+                    example: 12
+                  mensaje:
+                    type: string
+                    example: Cambios guardados en borrador con éxito.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+    delete:
+      tags:
+        - Templates
+      operationId: deleteTemplate
+      summary: Eliminar una plantilla que nunca se ha publicado
+      description: |
+        Elimina por completo una plantilla cuya única versión es la 1 en `BORRADOR` (nunca se publicó, así que no tiene
+        solicitudes). Se borran la plantilla, esa versión y el flujo en `BORRADOR` del que la versión era dueña; los
+        flujos `ACTIVO` que usaba no se tocan. La acción no se puede deshacer.
+        Una plantilla que ya tuvo una versión publicada no se elimina (`409`, `CONFLICTO_ESTADO`): sus versiones
+        tienen solicitudes e historial. Para retirarla del catálogo está `POST /api/templates/{id}/deactivate`.
+        Una plantilla de otra unidad responde `404`.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la plantilla
+      responses:
+        '204':
+          description: Plantilla eliminada
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/templates/{id}/versions:
+    post:
+      tags:
+        - Templates
+      operationId: createTemplateVersion
+      summary: Crear nueva versión para edición (Clonado seguro)
+      description: |
+        Clona la versión activa actual hacia una nueva fila con estado `BORRADOR` y
+        `numeroVersion = max + 1`. Esto garantiza que la versión en producción continúe
+        operando sin interrupciones mientras el administrador edita los cambios.
+        Si la plantilla fue desactivada y no tiene versión `ACTIVO`, se clona la de mayor `numeroVersion`, de modo
+        que una plantilla desactivada se puede volver a editar y publicar.
+        Responde `409` si la plantilla ya tiene una versión en `BORRADOR` (se edita esa). En ese caso, `detalles` trae
+        `{ campo: "idVersion", mensaje: "<idVersion del borrador>" }` para que el cliente lo abra.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la plantilla
+      responses:
+        '201':
+          description: Nueva versión borrador clonada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  idVersion:
+                    type: integer
+                    example: 14
+                  numeroVersion:
+                    type: integer
+                    example: 2
+                  estado:
+                    type: string
+                    example: BORRADOR
+                  mensaje:
+                    type: string
+                    example: Nueva versión 2 creada para edición.
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/templates/{id}/publish:
+    post:
+      tags:
+        - Templates
+      operationId: publishTemplate
+      summary: Publicar versión a producción
+      description: |
+        Activa de forma atómica la versión indicada (`estado = ACTIVO`, `fecha_public = now()`)
+        y pasa a estado `INACTIVO` cualquier versión previamente activa de la plantilla.
+
+        **Requisito:** la versión debe tener un flujo de aprobación con al menos un paso. Sin flujo no se
+        puede publicar (responde `409`), de modo que ninguna versión `ACTIVO` queda sin cadena de aprobación
+        ni aparece en el catálogo de los solicitantes.
+
+        **Flujo:** si el flujo está en `BORRADOR`, pasa a `ACTIVO` y queda reutilizable. Antes de publicar se
+        vuelven a comprobar las reglas del flujo contra los titulares de hoy: cada paso debe tener un titular con
+        cuenta activa y rol `APROBADOR` (`409` `APROBADOR_INVALIDO`) y ninguna persona puede estar en dos pasos
+        (`409` `CONFLICTO_ESTADO`).
+
+        **Documentos en proceso:** las solicitudes `PENDIENTE` conservan la versión y el flujo con los que fueron
+        radicadas; publicar una versión nueva nunca las migra, aunque el flujo nuevo parezca una ampliación del
+        anterior, y tampoco migra las de una versión desactivada. Las solicitudes `APROBADO` y `RECHAZADO` nunca
+        se modifican. Solo las solicitudes radicadas después de la publicación usan la versión nueva.
+
+        **Validaciones del documento** (`400 VALIDACION_FALLIDA`, un elemento de `detalles` por falla):
+        - `cuerpoDocumento` tiene al menos un texto o una variable.
+        - Cada nodo `variable` del cuerpo es una variable automática o está definido en `variableFormJson`, y
+          cada variable de `variableFormJson` aparece en el cuerpo.
+        - Hay a lo sumo un `signatureBlock`, y hay exactamente uno si algún paso del flujo tiene `reqFirma`.
+        - Si el flujo tiene un paso `ESCUELA_SOLICITANTE`, la `audiencia` es solo `ESTUDIANTE` (solo ellos tienen carrera
+          y escuela). Además, cada escuela con carreras debe tener un titular de ese cargo que pueda aprobar
+          (`409` `APROBADOR_INVALIDO`).
+        - Las reglas de `VariableFormJson` (ids únicos, `select` con opciones, `min` ≤ `max`, choque con `{id}Otro`).
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - idVersion
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión en borrador a publicar
+                  example: 14
+      responses:
+        '200':
+          description: Versión publicada y disponible para los solicitantes
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idPlantilla
+                  - idVersion
+                  - numeroVersion
+                  - estado
+                  - mensaje
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  idVersion:
+                    type: integer
+                    example: 14
+                  numeroVersion:
+                    type: integer
+                    example: 2
+                  estado:
+                    type: string
+                    example: ACTIVO
+                  mensaje:
+                    type: string
+                    example: La versión 2 ha sido publicada exitosamente.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/templates/{id}/deactivate:
+    post:
+      tags:
+        - Templates
+      operationId: deactivateTemplate
+      summary: Desactivar la versión publicada (retirar el trámite)
+      description: |
+        Pasa la versión `ACTIVO` a `INACTIVO`: la plantilla deja de aparecer en el catálogo y no admite solicitudes
+        nuevas (`POST /api/requests` responde `409`). Las solicitudes que ya están en proceso **no se tocan**:
+        conservan su versión y su flujo, y terminan normalmente. El flujo no cambia y sigue reutilizable.
+
+        Para volver a ofrecer el trámite se crea una versión nueva con `POST /api/templates/{id}/versions` (clona la
+        última) y se publica. Responde `409` si la versión no está `ACTIVO`.
+      x-roles:
+        - ADMINISTRADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - idVersion
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión `ACTIVO` a desactivar
+                  example: 14
+      responses:
+        '200':
+          description: Versión desactivada
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idPlantilla
+                  - idVersion
+                  - numeroVersion
+                  - estado
+                  - mensaje
+                properties:
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  idVersion:
+                    type: integer
+                    example: 14
+                  numeroVersion:
+                    type: integer
+                    example: 2
+                  estado:
+                    type: string
+                    example: INACTIVO
+                  mensaje:
+                    type: string
+                    example: La versión 2 fue desactivada. Las solicitudes en proceso continúan.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/requests:
+    post:
+      tags:
+        - Requests
+      operationId: createRequest
+      summary: Enviar formulario completado (Crear solicitud)
+      description: |
+        El solicitante envía las respuestas del formulario web (`datosJson`).
+        El cliente envía únicamente `idVersion`: la versión identifica a la plantilla, su formulario, su diseño
+        y su flujo de aprobación, y es la que se guarda en la solicitud (`solicitudes.id_version`).
+        El backend valida que la versión esté `ACTIVO` y que las variables requeridas estén completas, e inicializa
+        el primer paso en la tabla `aprobaciones`. Como solo se publican versiones con flujo, una versión `ACTIVO`
+        siempre tiene al menos un paso.
+
+        **Quién puede solicitar:** solo plantillas de su unidad cuya `audiencia` incluya alguno de sus estamentos; si la
+        versión no existe o no le corresponde responde `404`. Una versión que le corresponde pero ya no está `ACTIVO`
+        (se publicó otra o se desactivó) responde `409`. No se impide que un aprobador solicite un
+        trámite en cuyo flujo participa.
+
+        **Datos que fija el servidor:** la ruta de aprobación de la solicitud (`solicitudes.id_flujo`) es el flujo de la
+        versión, y su unidad (`solicitudes.cod_unidad`) es la de la plantilla: la unidad a la que pertenece el trámite.
+        Solo la ve el personal de esa unidad que pasa por el flujo. Los pasos `ESCUELA_SOLICITANTE` del flujo se resuelven al radicar: el backend toma al titular de
+        ese cargo en la escuela de la carrera del solicitante y la ruta de la solicitud (`PasoDocumento`) queda con esa
+        persona, de modo que cada estudiante llega al director de su escuela. Si la escuela no tiene un titular que
+        pueda aprobar, responde `409` (`APROBADOR_INVALIDO`) y no se crea la solicitud.
+        Si el titular del primer paso ya no puede aprobar
+        (cuenta inactiva o sin rol `APROBADOR`), responde `409` (`APROBADOR_INVALIDO`) y no se crea la solicitud.
+        El código documental (`UP{código de la unidad, 2 dígitos}-{año}-{número de 4 dígitos}`; el número reinicia cada año por unidad)
+        lo genera la base de datos al insertar la solicitud (trigger); el cliente nunca lo envía.
+        Al radicar, el backend resuelve las variables automáticas (`VariablesSistema`) con los datos del solicitante
+        en ese momento y las congela en `solicitudes.datos_json` bajo la clave reservada `_sistema` (sin cambios de
+        esquema). `datosJson` no puede traer claves que empiecen con `_` (`400`).
+        Las claves que no son variables de la versión (ni el `{id}Otro` de un `select` con `opcionOtro`) se descartan.
+        Si la versión ya no está activa (se publicó una nueva mientras el usuario llenaba el formulario),
+        responde `409` para que el cliente recargue el catálogo.
+        En el `400`, cada elemento de `detalles` trae en `campo` el `id` de la variable incorrecta, sin prefijos.
+      x-roles:
+        - SOLICITANTE
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - idVersion
+                - datosJson
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión activa de la plantilla que se respondió (`idVersion` del catálogo)
+                  example: 12
+                datosJson:
+                  type: object
+                  description: Mapa clave-valor con las respuestas recolectadas del formulario web
+                  example:
+                    codigoAsignatura: INF-204 Base de Datos I
+                    motivoRetiro: LABORAL
+                    justificacion: Cambio de turno en la empresa que coincide con el horario del laboratorio.
+      responses:
+        '201':
+          description: Solicitud registrada e ingresada al flujo de aprobación
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idSolicitud
+                  - codigoDocumento
+                  - estado
+                  - fechaCreacion
+                  - mensaje
+                properties:
+                  idSolicitud:
+                    type: integer
+                    example: 101
+                  codigoDocumento:
+                    type: string
+                    example: UP24-2026-0001
+                  estado:
+                    $ref: '#/components/schemas/EstadoSolicitud'
+                  fechaCreacion:
+                    type: string
+                    format: date-time
+                    example: '2026-10-06T13:30:00Z'
+                  mensaje:
+                    type: string
+                    example: Su solicitud ha sido enviada con éxito al Director/a de Escuela.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/requests/me:
+    get:
+      tags:
+        - Requests
+      operationId: listMyRequests
+      summary: Historial de trámites del usuario autenticado
+      description: |
+        Lista las solicitudes enviadas por el usuario en sesión, con su estado y la fecha de resolución. Es una lista
+        personal: se devuelve como arreglo plano, ordenada de la más reciente a la más antigua.
+        `resolucion` solo viene en solicitudes `APROBADO` o `RECHAZADO`, con el cargo y la persona tal como quedaron al
+        decidir; mientras está `PENDIENTE` vale `null`.
+        El paso en curso y la ruta de aprobación se consultan en el detalle (`/api/requests/{id}`).
+        Todo usuario activo tiene el rol `SOLICITANTE`, incluidos aprobadores y administradores.
+      x-roles:
+        - SOLICITANTE
+      responses:
+        '200':
+          description: Listado de trámites enviados por el solicitante
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - idSolicitud
+                    - codigoDocumento
+                    - nombrePlantilla
+                    - estado
+                    - fechaCreacion
+                    - resolucion
+                  properties:
+                    idSolicitud:
+                      type: integer
+                      example: 101
+                    codigoDocumento:
+                      type: string
+                      example: UP24-2026-0001
+                    nombrePlantilla:
+                      type: string
+                      example: Solicitud de Retiro de Asignatura
+                    estado:
+                      $ref: '#/components/schemas/EstadoSolicitud'
+                    fechaCreacion:
+                      type: string
+                      format: date-time
+                      example: '2026-10-06T13:30:00Z'
+                    resolucion:
+                      type: object
+                      nullable: true
+                      description: Cargo que aprobó o rechazó el trámite; `null` mientras esté `PENDIENTE`
+                      allOf:
+                        - $ref: '#/components/schemas/ResolucionResumen'
+                    motivoRechazo:
+                      type: string
+                      nullable: true
+                      description: Comentario de la autoridad que rechazó la solicitud; `null` si no está `RECHAZADO`
+                      example: La justificación no cumple con el reglamento académico.
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+  /api/requests/{id}:
+    get:
+      tags:
+        - Requests
+      operationId: getRequest
+      summary: Detalle y línea de tiempo de una solicitud (Revisión y Seguimiento)
+      description: |
+        Retorna la ficha del solicitante, metadatos del trámite, respuestas del formulario y
+        la línea de tiempo secuencial.
+        Incluye además todo lo necesario para que el **cliente arme la vista previa** del oficio
+        (`variableFormJson` y `disenoFormJson` de la versión con la que se radicó la solicitud, y la firma
+        de cada paso ya aprobado). Disponible para el aprobador en cualquier paso, incluso si otros cargos ya aprobaron.
+        Para la vista previa se usan `variablesSistema` (valores congelados al radicar) y `pasosDocumento` (todos los
+        pasos del flujo, alcanzados o no, con `reqFirma` para armar el bloque de firmas).
+
+        **Historial inmutable:** `pasosDocumento` y `lineaTiempo` salen de la ruta de la solicitud
+        (`solicitudes.id_flujo`, que se fija al radicar y no se migra al publicar versiones nuevas). Los
+        pasos ya decididos muestran el cargo, el área y la persona que había al decidir; no cambian aunque después
+        cambien el cargo o su titular. Los pasos pendientes y futuros muestran los datos vigentes. Esta vista previa es
+        solo de lectura: el PDF lo descarga únicamente el solicitante (`/api/documents/{requestId}/pdf`).
+        Si la autoridad en sesión es la asignada en el paso actual, retorna `idAprobacionPendiente`
+        para permitir resolver directamente en esta misma pantalla.
+
+
+        **Quién puede abrir una solicitud:**
+        - **Solicitante:** solo las que él mismo envió.
+        - **Aprobador:** solo las que pasaron por su cargo en el flujo de aprobación (la que tiene pendiente y
+          las que ya resolvió). El paso siguiente se crea cuando el anterior aprueba, así que no la ve antes de
+          que le llegue.
+        - **Administrador de plantillas:** su rol solo gestiona plantillas y no da acceso a solicitudes ajenas.
+          Como todo usuario activo es también solicitante, ve únicamente las que él mismo envió.
+
+        Quien no tenga acceso recibe `404`, igual que si la solicitud no existiera.
+      x-roles:
+        - SOLICITANTE
+        - APROBADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador único de la solicitud
+      responses:
+        '200':
+          description: Detalle completo de la solicitud y avance del flujo
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idSolicitud
+                  - codigoDocumento
+                  - idPlantilla
+                  - nombrePlantilla
+                  - idVersion
+                  - estado
+                  - fechaCreacion
+                  - solicitante
+                  - datosJson
+                  - variablesSistema
+                  - variableFormJson
+                  - disenoFormJson
+                  - pasosDocumento
+                  - lineaTiempo
+                properties:
+                  idSolicitud:
+                    type: integer
+                    example: 101
+                  codigoDocumento:
+                    type: string
+                    example: UP24-2026-0001
+                  idPlantilla:
+                    type: integer
+                    example: 5
+                  nombrePlantilla:
+                    type: string
+                    example: Solicitud de Retiro de Asignatura
+                  idVersion:
+                    type: integer
+                    example: 12
+                  estado:
+                    $ref: '#/components/schemas/EstadoSolicitud'
+                  fechaCreacion:
+                    type: string
+                    format: date-time
+                    example: '2026-10-06T13:30:00Z'
+                  fechaResolucion:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: '`null` mientras esté `PENDIENTE`'
+                    example: '2026-10-08T10:15:00Z'
+                  idAprobacionPendiente:
+                    type: integer
+                    nullable: true
+                    description: Presente si el usuario autenticado tiene una resolución pendiente sobre este trámite
+                    example: 45
+                  solicitante:
+                    type: object
+                    required:
+                      - idUsuario
+                      - nombreCompleto
+                      - cedula
+                      - correo
+                    properties:
+                      idUsuario:
+                        type: integer
+                        example: 8
+                      nombreCompleto:
+                        type: string
+                        example: Alex Demo
+                      cedula:
+                        type: string
+                        example: 9-000-0001
+                      correo:
+                        type: string
+                        example: alex.demo@up.ac.pa
+                      carrera:
+                        type: string
+                        nullable: true
+                        description: Descripción de la carrera; `null` si el solicitante no es estudiante
+                        example: Licenciatura en Ingeniería en Informática
+                  datosJson:
+                    type: object
+                    description: Mapa clave-valor con las respuestas registradas, sin las claves reservadas (`_sistema`)
+                    example:
+                      codigoAsignatura: INF-204 Base de Datos I
+                      motivoRetiro: LABORAL
+                      justificacion: Cambio de turno en la empresa...
+                  variablesSistema:
+                    $ref: '#/components/schemas/VariablesSistema'
+                  variableFormJson:
+                    $ref: '#/components/schemas/VariableFormJson'
+                  disenoFormJson:
+                    $ref: '#/components/schemas/DisenoFormJson'
+                  pasosDocumento:
+                    type: array
+                    description: Todos los pasos del flujo de la versión, ordenados por `secuencia`
+                    items:
+                      $ref: '#/components/schemas/PasoDocumento'
+                  lineaTiempo:
+                    type: array
+                    description: |
+                      Pasos ya alcanzados (las aprobaciones se crean a medida que avanza el flujo), ordenados por
+                      `secuencia`. Los pasos futuros solo están en `pasosDocumento`.
+                    items:
+                      type: object
+                      required:
+                        - secuencia
+                        - nombreCargo
+                        - estado
+                      properties:
+                        secuencia:
+                          type: integer
+                          example: 1
+                        nombreCargo:
+                          type: string
+                          example: Director/a de Escuela
+                        titular:
+                          type: string
+                          nullable: true
+                          example: Dra. Lia Muestra
+                        estado:
+                          $ref: '#/components/schemas/EstadoAprobacion'
+                        fechaAccion:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          example: '2026-10-06T15:00:00Z'
+                        comentario:
+                          type: string
+                          nullable: true
+                          example: Cumple con el reglamento académico.
+                        firmaUrl:
+                          type: string
+                          nullable: true
+                          description: 'URL firmada y temporal de la firma del titular (Storage privado); solo en pasos aprobados con `reqFirma`. Caduca: no se guarda'
+                          example: https://proyecto.supabase.co/storage/v1/object/sign/firmas/12/20261015.png?token=...
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/CambioPasswordRequerido'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+  /api/approvals/pending:
+    get:
+      tags:
+        - Approvals
+      operationId: listPendingApprovals
+      summary: Bandeja de trámites pendientes para la autoridad
+      description: |
+        Retorna las solicitudes que están actualmente asignadas a la autoridad autenticada en el paso activo,
+        en espera de su revisión y resolución. Es una lista personal: se devuelve como arreglo plano.
+      x-roles:
+        - APROBADOR
+      responses:
+        '200':
+          description: Lista de solicitudes pendientes en la bandeja de entrada
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - idAprobacion
+                    - idSolicitud
+                    - codigoDocumento
+                    - nombrePlantilla
+                    - solicitanteNombre
+                    - solicitanteCedula
+                    - fechaAsignacion
+                  properties:
+                    idAprobacion:
+                      type: integer
+                      example: 45
+                    idSolicitud:
+                      type: integer
+                      example: 101
+                    codigoDocumento:
+                      type: string
+                      example: UP24-2026-0001
+                    nombrePlantilla:
+                      type: string
+                      example: Solicitud de Retiro de Asignatura
+                    solicitanteNombre:
+                      type: string
+                      example: Alex Demo
+                    solicitanteCedula:
+                      type: string
+                      example: 9-000-0001
+                    fechaAsignacion:
+                      type: string
+                      format: date-time
+                      example: '2026-10-06T13:35:00Z'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+  /api/approvals/history:
+    get:
+      tags:
+        - Approvals
+      operationId: listApprovalHistory
+      summary: Historial de resoluciones de la autoridad (Paginado)
+      description: |
+        Lista las decisiones ya emitidas (`APROBADO` o `RECHAZADO`) por la autoridad autenticada,
+        de la más reciente a la más antigua. Sirve para el historial de resoluciones y para los
+        indicadores del panel: el total de resueltos en un periodo se obtiene con `desde`/`hasta` y `total`.
+        Una `decision` fuera del enum o una fecha inválida en `desde`/`hasta` responde `400`.
+      x-roles:
+        - APROBADOR
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Número de página actual
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+          description: Cantidad de resoluciones por página
+        - in: query
+          name: decision
+          schema:
+            type: string
+            enum:
+              - APROBADO
+              - RECHAZADO
+          description: Filtrar por tipo de decisión
+        - in: query
+          name: desde
+          schema:
+            type: string
+            format: date-time
+          description: Incluye solo resoluciones con `fechaAccion` igual o posterior
+        - in: query
+          name: hasta
+          schema:
+            type: string
+            format: date-time
+          description: Incluye solo resoluciones con `fechaAccion` anterior a este valor
+      responses:
+        '200':
+          description: Lista paginada de resoluciones emitidas por la autoridad
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - total
+                  - pagina
+                  - limite
+                  - totalPaginas
+                  - datos
+                properties:
+                  total:
+                    type: integer
+                    example: 12
+                  pagina:
+                    type: integer
+                    example: 1
+                  limite:
+                    type: integer
+                    example: 10
+                  totalPaginas:
+                    type: integer
+                    example: 2
+                  datos:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - idAprobacion
+                        - idSolicitud
+                        - codigoDocumento
+                        - nombrePlantilla
+                        - solicitanteNombre
+                        - solicitanteCedula
+                        - decision
+                        - fechaAccion
+                      properties:
+                        idAprobacion:
+                          type: integer
+                          example: 45
+                        idSolicitud:
+                          type: integer
+                          example: 101
+                        codigoDocumento:
+                          type: string
+                          example: UP24-2026-0001
+                        nombrePlantilla:
+                          type: string
+                          example: Solicitud de Retiro de Asignatura
+                        solicitanteNombre:
+                          type: string
+                          example: Alex Demo
+                        solicitanteCedula:
+                          type: string
+                          example: 9-000-0001
+                        decision:
+                          $ref: '#/components/schemas/EstadoAprobacion'
+                        comentario:
+                          type: string
+                          nullable: true
+                          example: Revisado y conforme con los estatutos universitarios.
+                        fechaAccion:
+                          type: string
+                          format: date-time
+                          example: '2026-10-06T16:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+  /api/approvals/{id}/decision:
+    post:
+      tags:
+        - Approvals
+      operationId: decideApproval
+      summary: Emitir decisión sobre un trámite (Aprobar o Rechazar)
+      description: |
+        La autoridad registra su decisión formal.
+        - Si aprueba: se vincula su firma digital y, si es el último paso, la solicitud finaliza en `APROBADO`.
+          Si hay más pasos, se crea el siguiente.
+        - Si rechaza: el comentario es obligatorio y la solicitud finaliza de inmediato en `RECHAZADO`.
+
+        **Paso siguiente:** al aprobar, si el titular del paso siguiente ya no puede aprobar (cuenta, persona o
+        asignación inactivas, o sin el rol `APROBADOR`), responde `409` (`APROBADOR_INVALIDO`) y **la decisión no se
+        registra**: la solicitud sigue pendiente en este paso hasta que se corrijan los datos del cargo.
+
+        **Firma:** al aprobar un paso con `reqFirma` se vincula la única firma activa del aprobador. Si no tiene
+        ninguna, la aprobación se registra igual como visto bueno, sin firma: el documento no muestra imagen para
+        ese paso (`firmaUrl` nulo). No es un error.
+
+        **Quién puede decidir:** solo el usuario al que está asignada la aprobación; para cualquier otro, o si el id no
+        existe, responde `404`. Responde `409` (`CONFLICTO_ESTADO`) si el paso ya fue decidido o si la solicitud ya no
+        está `PENDIENTE`.
+
+        **Historial inmutable:** al decidir se guardan el cargo, el área y el nombre y la cédula de quien decide. Una
+        aprobación decidida no se puede modificar ni borrar; si después cambian el cargo o la persona, el historial
+        sigue mostrando lo que había al decidir.
+      x-roles:
+        - APROBADOR
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Identificador del paso de aprobación (`idAprobacion`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - decision
+              properties:
+                decision:
+                  type: string
+                  enum:
+                    - APROBADO
+                    - RECHAZADO
+                  example: APROBADO
+                comentario:
+                  type: string
+                  maxLength: 1000
+                  description: Observaciones o justificación formal (obligatorio en caso de rechazo); más de 1000 caracteres responde `400`
+                  example: Revisado y conforme con los estatutos universitarios.
+      responses:
+        '200':
+          description: Resolución registrada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - idAprobacion
+                  - estadoAprobacion
+                  - estadoSolicitud
+                  - fechaAccion
+                  - solicitudFinalizada
+                  - mensaje
+                properties:
+                  idAprobacion:
+                    type: integer
+                    example: 45
+                  estadoAprobacion:
+                    $ref: '#/components/schemas/EstadoAprobacion'
+                  estadoSolicitud:
+                    $ref: '#/components/schemas/EstadoSolicitud'
+                  fechaAccion:
+                    type: string
+                    format: date-time
+                    example: '2026-10-06T16:00:00Z'
+                  solicitudFinalizada:
+                    type: boolean
+                    example: false
+                  mensaje:
+                    type: string
+                    example: Decisión registrada exitosamente.
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+  /api/documents/{requestId}/pdf:
+    get:
+      tags:
+        - Documents
+      operationId: downloadDocumentPdf
+      summary: Descargar documento oficial en PDF (Vectorial 300 DPI)
+      description: |
+        El backend compila y renderiza el documento mediante Chromium/Puppeteer.
+        Produce un archivo PDF oficial tamaño Carta (*Letter*) con fidelidad tipográfica estricta,
+        marca de agua institucional del Escudo de la UP de fondo (6-8% opacidad) y firmas estampadas.
+
+        **Quién puede descargarlo:** únicamente el solicitante que envió la solicitud. Los aprobadores y los
+        administradores ven el documento en la vista previa de pantalla (`GET /api/requests/{id}`) pero no pueden
+        descargarlo. Para quien no sea el solicitante, o si la solicitud no existe, responde `404`.
+
+        **Restricción de estado:** solo las solicitudes `APROBADO` tienen documento. Una solicitud `RECHAZADO`
+        o `PENDIENTE` no genera documento y retorna un error 400.
+
+        **Sin almacenamiento:** el PDF se genera en cada petición y se entrega directamente al navegador;
+        no se almacena. Solo se persisten datos. Las firmas se leen del Storage
+        privado con la clave de servicio del backend y se incrustan en el documento.
+      x-roles:
+        - SOLICITANTE
+      parameters:
+        - in: path
+          name: requestId
+          required: true
+          schema:
+            type: integer
+          description: Identificador de la solicitud (`idSolicitud`)
+      responses:
+        '200':
+          description: Archivo binario PDF generado por el backend
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="UP24-2026-0001.pdf"
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ValidacionFallida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '429':
+          $ref: '#/components/responses/DemasiadasSolicitudes'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Estamento:
+      type: string
+      description: Estamento universitario del usuario (determina trámites aplicables)
+      enum:
+        - ESTUDIANTE
+        - PROFESOR
+        - ADMINISTRATIVO
+    RolSistema:
+      type: string
+      description: Rol de privilegios en el sistema (control de acceso y navegación)
+      enum:
+        - SOLICITANTE
+        - APROBADOR
+        - ADMINISTRADOR
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - codigo
+            - mensaje
+          properties:
+            codigo:
+              type: string
+              description: |
+                Código de error legible por máquina en MAYÚSCULAS. El cliente decide por el estado HTTP y, cuando hace
+                falta distinguir, por este código. Códigos definidos:
+                - `VALIDACION_FALLIDA` (400): campos faltantes o incorrectos; `detalles` indica cuáles.
+                - `APROBADOR_INVALIDO` (400 al crear o editar un flujo; 409 al publicar o radicar): un paso tiene un titular
+                  sin cuenta activa o sin el rol `APROBADOR`. En el 400, `detalles[].campo = pasos[i].idAsignacion`.
+                  En un paso `ESCUELA_SOLICITANTE`, al radicar, también se usa si la escuela del solicitante no tiene
+                  un titular del cargo que pueda aprobar.
+                - `PASSWORD_ACTUAL_INCORRECTA` (400): la contraseña actual no coincide.
+                - `CREDENCIALES_INVALIDAS` (401): login rechazado.
+                - `NO_AUTENTICADO` (401): token ausente, inválido o vencido.
+                - `DEMASIADOS_INTENTOS` (429): el login superó los intentos fallidos permitidos; trae `Retry-After`.
+                - `DEMASIADAS_SOLICITUDES` (429): se superó el límite de peticiones (general de la API o de PDF); trae
+                  `Retry-After`.
+                - `SIN_PERMISO` (403): el rol no permite la acción.
+                - `CAMBIO_PASSWORD_REQUERIDO` (403): la cuenta debe cambiar su contraseña inicial.
+                - `NO_ENCONTRADO` (404): el recurso no existe o el usuario no tiene acceso a él.
+                - `CONFLICTO_ESTADO` (409): la operación no es válida para el estado actual del recurso.
+                - `SERVICIO_NO_DISPONIBLE` (503): el servidor está saturado (sin conexión a la base disponible a tiempo). La
+                  respuesta trae `Retry-After` (segundos); el cliente puede reintentar.
+                - `ERROR_INTERNO` (500): error no controlado.
+              example: CREDENCIALES_INVALIDAS
+            mensaje:
+              type: string
+              description: Mensaje en español para mostrar en la interfaz
+              example: Identificador o contraseña incorrectos.
+            detalles:
+              type: array
+              description: Lista detallada de fallos de validación por campo
+              items:
+                type: object
+                properties:
+                  campo:
+                    type: string
+                    example: identificador
+                  mensaje:
+                    type: string
+                    example: El identificador no puede estar vacío
+    UnidadResumen:
+      type: object
+      properties:
+        codUnidad:
+          type: integer
+          example: 24
+        nombre:
+          type: string
+          description: Nombre sin el tipo de unidad
+          example: Informática, Electrónica y Comunicación
+        tipoUnidad:
+          type: string
+          nullable: true
+          description: FACULTAD, DIRECCION, INSTITUTO, VICERRECTORIA o SECRETARÍA
+          example: FACULTAD
+        abrev:
+          type: string
+          nullable: true
+          example: FIEC
+    CarreraResumen:
+      type: object
+      properties:
+        idCarrera:
+          type: integer
+          example: 1
+        descripcion:
+          type: string
+          example: Licenciatura en Ingeniería en Informática
+        escuela:
+          type: string
+          nullable: true
+          description: |
+            Escuela académica a la que pertenece la carrera (`null` si la carrera aún no tiene escuela asignada). De ella depende el Director/a de Escuela que aprueba los
+            trámites del estudiante (pasos `ESCUELA_SOLICITANTE`) y la línea de escuela del membrete.
+          example: Escuela de Ingeniería Informática
+    CargoResumen:
+      type: object
+      required:
+        - idAsignacion
+        - idCargo
+        - nombreCargo
+        - titularActual
+        - idUsuarioTitular
+        - area
+        - esAprobador
+      properties:
+        idAsignacion:
+          type: integer
+          example: 12
+          description: Identificador de la asignación administrativa vigente
+        idCargo:
+          type: integer
+          example: 14
+        nombreCargo:
+          type: string
+          example: Director/a de Escuela
+        titularActual:
+          type: string
+          example: Dra. Lia Muestra
+          description: Nombre de la persona que ocupa la asignación
+        idUsuarioTitular:
+          type: integer
+          nullable: true
+          description: |
+            Usuario de la persona que ocupa el cargo; `null` si esa persona no tiene cuenta. Identifica a la persona:
+            una misma persona puede tener varias asignaciones (cargos) y no puede repetirse en un flujo.
+          example: 31
+        area:
+          type: string
+          example: Escuela de Ingeniería Informática
+          description: La escuela o el departamento de la asignación si los tiene («Departamento de …»); si no, su área («Área General» si no define una)
+        escuela:
+          type: string
+          nullable: true
+          description: |
+            Escuela de la asignación. Solo los cargos por escuela (hoy «Director/a de Escuela» y la secretaria de cada
+            escuela) la traen; vale `null` en los cargos de toda la facultad (Decano/a, Vicedecano/a, Secretaría
+            Administrativa) y en los de un departamento. Con un `idCargo` que tiene escuela, un flujo puede usar el paso
+            `ESCUELA_SOLICITANTE`.
+          example: Escuela de Ingeniería Informática
+        departamento:
+          type: string
+          nullable: true
+          description: |
+            Departamento de la asignación (directores de departamento y sus secretarias); `null` en los cargos de toda
+            la facultad. Es el que usa la variable automática `personal.departamento`.
+          example: Informática
+        esAprobador:
+          type: boolean
+          description: |
+            `true` si el titular puede aprobar: cuenta activa, persona y asignación activas, y rol `APROBADOR`. El rol
+            es de la persona; el paso concreto (cargo) lo elige el administrador por `idAsignacion`, y un paso con
+            `reqFirma: false` es un visto bueno sin firma. Solo estos cargos pueden ser pasos de un flujo; un titular
+            sin cuenta, inactivo o sin el rol vale `false`.
+          example: true
+    PasoFlujoBase:
+      type: object
+      required:
+        - secuencia
+      properties:
+        secuencia:
+          type: integer
+          minimum: 1
+          description: Posición del paso. En un flujo las secuencias son únicas y consecutivas desde 1
+          example: 1
+        reqFirma:
+          type: boolean
+          default: true
+          example: true
+        nombreCargo:
+          type: string
+          readOnly: true
+          description: Solo en respuestas; al crear un flujo se deduce de `idAsignacion` o de `idCargo`
+          example: Director/a de Escuela
+        titular:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Solo en respuestas; al crear un flujo se deduce de `idAsignacion`. `null` en un paso `ESCUELA_SOLICITANTE` sin resolver
+          example: Dra. Lia Muestra
+        area:
+          type: string
+          readOnly: true
+          description: Solo en respuestas; área de la asignación («Área General» si no define una; «Escuela del solicitante» en un paso `ESCUELA_SOLICITANTE` sin resolver)
+          example: Escuela de Ingeniería Informática
+    PasoFlujoFijo:
+      description: Paso de una autoridad concreta (cargos de toda la facultad o de un departamento)
+      allOf:
+        - $ref: '#/components/schemas/PasoFlujoBase'
+        - type: object
+          required:
+            - idAsignacion
+          properties:
+            alcance:
+              type: string
+              enum:
+                - FIJO
+              default: FIJO
+              example: FIJO
+            idAsignacion:
+              type: integer
+              description: Identificador de la asignación administrativa de la autoridad
+              example: 12
+            idCargo:
+              type: integer
+              readOnly: true
+              description: Solo en respuestas; se deduce de `idAsignacion`. Al crear un flujo no se envía
+              example: 14
+    PasoFlujoEscuela:
+      description: |
+        Paso por escuela: el titular del cargo en la escuela de la carrera del solicitante, que se resuelve al radicar
+      allOf:
+        - $ref: '#/components/schemas/PasoFlujoBase'
+        - type: object
+          required:
+            - alcance
+            - idCargo
+          properties:
+            alcance:
+              type: string
+              enum:
+                - ESCUELA_SOLICITANTE
+              example: ESCUELA_SOLICITANTE
+            idCargo:
+              type: integer
+              description: Un cargo cuyas asignaciones tienen escuela (`CargoResumen.escuela`)
+              example: 9
+            idAsignacion:
+              type: integer
+              nullable: true
+              readOnly: true
+              description: Solo en respuestas. `null` mientras no se conoce al solicitante; en la vista del solicitante (`GET /api/templates/{id}`), la asignación de su escuela. Al crear un flujo no se envía
+              example: null
+    PasoFlujo:
+      description: |
+        Paso de un flujo de aprobación: `PasoFlujoFijo` o `PasoFlujoEscuela`, según `alcance` (sin `alcance` es `FIJO`).
+        Al crear o editar un flujo, un paso con campos de la otra clase responde `400` (`VALIDACION_FALLIDA`).
+
+        Paso de un flujo de aprobación. Hay dos clases, según `alcance`:
+
+        - `FIJO` (por defecto): una autoridad concreta, `idAsignacion`. Es lo que se usa en los cargos de toda la
+          facultad (Decano/a, Vicedecano/a, Secretaría Administrativa) y en los de un departamento.
+        - `ESCUELA_SOLICITANTE`: un cargo **por escuela** (`idCargo`; hoy «Director/a de Escuela»). El flujo no fija a
+          la persona: al radicar, el backend toma al titular de ese cargo en la escuela de la carrera del solicitante
+          (`CarreraResumen.escuela`). Así una misma plantilla sirve a todos los estudiantes y cada trámite llega al
+          director de su escuela. Solo se acepta en plantillas dirigidas únicamente a `ESTUDIANTE`.
+
+        En las respuestas, el paso `ESCUELA_SOLICITANTE` llega sin resolver (`idAsignacion` y `titular` en `null`, `area`
+        «Escuela del solicitante») para el administrador, y resuelto con la escuela del usuario para el solicitante
+        (`GET /api/templates/{id}`). Una vez radicada, la ruta de la solicitud queda con el titular concreto
+        (`PasoDocumento`).
+      oneOf:
+        - $ref: '#/components/schemas/PasoFlujoFijo'
+        - $ref: '#/components/schemas/PasoFlujoEscuela'
+    EstadoFlujo:
+      type: string
+      description: |
+        Ciclo de vida de un flujo de aprobación (en la BD `flujos.estado` guarda `B` y `A`).
+        - `BORRADOR`: flujo nuevo, dueño de una versión de plantilla en borrador. Se puede editar (`PUT /api/flows/{id}`)
+          y no aparece en la lista de flujos reutilizables.
+        - `ACTIVO`: flujo publicado junto con su plantilla. Su estructura no cambia nunca: para agregar, quitar o
+          reordenar pasos se crea otro flujo. Es reutilizable por otras plantillas de la unidad.
+      enum:
+        - BORRADOR
+        - ACTIVO
+    EstadoVersion:
+      type: string
+      description: Ciclo de vida de una versión de plantilla
+      enum:
+        - BORRADOR
+        - ACTIVO
+        - INACTIVO
+    TipoCampo:
+      type: string
+      description: |
+        Tipo de control interactivo para recolectar datos en el formulario web.
+        - `text`: texto corto. `textarea`: texto largo. `number`: número. `date`: fecha.
+        - `select`: lista de opciones; se muestra como lista desplegable o como botones de opción
+          según `presentacion`.
+        - `checkbox`: confirmación legal (declaración jurada); siempre es requerido y lleva `textoLegal`.
+      enum:
+        - text
+        - number
+        - date
+        - textarea
+        - select
+        - checkbox
+    OpcionSelector:
+      type: object
+      required:
+        - valor
+        - etiqueta
+      properties:
+        valor:
+          type: string
+          example: LABORAL
+        etiqueta:
+          type: string
+          example: Cruce de horario laboral certificado
+    ValidacionCampo:
+      type: object
+      description: Restricciones configurables; cada una aplica solo a los tipos indicados
+      properties:
+        min:
+          type: number
+          description: Mínimo de caracteres (`text`, `textarea`) o valor numérico (`number`)
+          example: 3
+        max:
+          type: number
+          description: Máximo de caracteres (`text`, `textarea`) o valor numérico (`number`)
+          example: 60
+        patron:
+          type: string
+          enum:
+            - ^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]+$
+            - ^[A-Za-z0-9 ]+$
+            - ^[^a-z]+$
+          description: |
+            Formato opcional para `text`: solo letras, alfanumérico o mayúsculas obligatorias. Solo se aceptan estos
+            tres valores (`400` al guardar con otro), para que ninguna expresión regular pueda trabar el servidor.
+          example: ^[A-Za-z0-9 ]+$
+        decimales:
+          type: boolean
+          default: false
+          description: '`number`: permite decimales; si es `false` solo enteros'
+          example: false
+        reglaTemporal:
+          type: string
+          enum:
+            - libre
+            - pasadas
+            - futuras
+          default: libre
+          description: '`date`: solo fechas pasadas, solo futuras o libre'
+          example: libre
+        soloDiasHabiles:
+          type: boolean
+          default: false
+          description: '`date`: deshabilita sábados y domingos'
+          example: false
+    VariableFormulario:
+      type: object
+      required:
+        - id
+        - etiqueta
+        - tipo
+        - requerido
+      properties:
+        id:
+          type: string
+          pattern: ^[a-zA-Z][a-zA-Z0-9_]*$
+          description: Identificador técnico de la variable insertada en el cuerpo TipTap
+          example: codigoAsignatura
+        etiqueta:
+          type: string
+          description: |
+            Nombre corto de la variable. Es el texto de la cápsula en el editor y el rótulo de la respuesta en el
+            resumen y el detalle de la solicitud. Si no hay `pregunta`, también es la etiqueta del campo en el
+            formulario web.
+          example: Código y Nombre de la Materia
+        pregunta:
+          type: string
+          maxLength: 200
+          description: |
+            Etiqueta del campo en el formulario web: indica al solicitante qué debe responder. Si se omite, el
+            formulario muestra `etiqueta`. El constructor la exige en las plantillas nuevas.
+          example: Indique el código y el nombre de la materia que desea retirar
+        tipo:
+          $ref: '#/components/schemas/TipoCampo'
+        requerido:
+          type: boolean
+          example: true
+        placeholder:
+          type: string
+          example: 'Ej: INF-101 Programación I'
+        opciones:
+          type: array
+          description: Lista de opciones requerida cuando tipo = 'select'
+          items:
+            $ref: '#/components/schemas/OpcionSelector'
+        presentacion:
+          type: string
+          enum:
+            - lista
+            - radio
+          default: lista
+          description: '`select`: lista desplegable o botones de opción'
+        opcionOtro:
+          type: boolean
+          default: false
+          description: |
+            `select`: agrega la opción «Otro». Si el solicitante la elige, se muestra un campo de texto adicional:
+            el valor de la variable es `OTRO` y el texto libre se guarda en `datosJson` bajo la clave `{id}Otro`.
+        textoLegal:
+          type: string
+          description: '`checkbox`: redacción del compromiso que el solicitante acepta; el valor en `datosJson` es `true`'
+          example: Declaro bajo juramento que la información suministrada es veraz.
+        validaciones:
+          $ref: '#/components/schemas/ValidacionCampo'
+    VariableFormJson:
+      type: object
+      required:
+        - variables
+      description: |
+        Definición del formulario web. El formulario nace del documento: solo se guardan las variables que se
+        usan en `cuerpoDocumento` y cada nodo `variable` de formulario debe tener su definición aquí. Las
+        variables automáticas del sistema (`auth.*`, `estudiante.*`, `personal.*`, `sistema.*`, `solicitud.*`)
+        no se declaran aquí. Los `id` deben ser únicos y ninguno puede coincidir con la clave `{id}Otro` de un
+        `select` con `opcionOtro`.
+        Las claves de `datosJson` que empiezan con `_` quedan reservadas para el sistema.
+      properties:
+        variables:
+          type: array
+          items:
+            $ref: '#/components/schemas/VariableFormulario'
+    DisenoFormato:
+      type: object
+      description: |
+        Tipografía base del documento. Aplica a todo el texto que no tenga su propia marca `textStyle`.
+        Los títulos (`heading`) mantienen su tamaño fijo (16 pt / 14 pt). Si se omite, rigen los valores por defecto.
+      properties:
+        fuente:
+          type: string
+          enum:
+            - Arial
+            - Times New Roman
+          default: Arial
+          example: Arial
+        tamano:
+          type: string
+          enum:
+            - 11pt
+            - 12pt
+          default: 11pt
+          example: 11pt
+        interlineado:
+          type: string
+          enum:
+            - '1.0'
+            - '1.15'
+            - '1.5'
+          default: '1.15'
+          example: '1.15'
+    LogoInstitucional:
+      type: string
+      nullable: true
+      description: |
+        Ruta de uno de los logos estáticos del proyecto, que comparten el cliente (`client/public/logos/`) y el
+        motor de PDF. `null` desactiva el logo. No hay subida de archivos.
+      enum:
+        - /logos/escudo_up.png
+        - /logos/logo_fiec.png
+        - null
+      example: /logos/escudo_up.png
+    DisenoEncabezado:
+      type: object
+      properties:
+        activo:
+          type: boolean
+          example: true
+        logoIzqUrl:
+          $ref: '#/components/schemas/LogoInstitucional'
+        logoDerUrl:
+          $ref: '#/components/schemas/LogoInstitucional'
+        linea1:
+          type: string
+          example: UNIVERSIDAD DE PANAMÁ
+          description: Admite los mismos marcadores `{{id}}` que `linea3`
+        linea2:
+          type: string
+          example: FACULTAD DE INFORMÁTICA, ELECTRÓNICA Y COMUNICACIÓN
+          description: Admite los mismos marcadores `{{id}}` que `linea3`
+        linea3:
+          type: string
+          nullable: true
+          description: |
+            Dependencia (opcional). Cada línea admite marcadores `{{id}}` con el id de una variable automática
+            (`VariablesSistema`), que se reemplazan por el valor del solicitante y se imprimen en mayúsculas.
+            Si el valor es `null`, la línea no se imprime. Al guardar la versión,
+            un marcador cuyo `id` no sea una variable automática responde `400` (`VALIDACION_FALLIDA`,
+            `detalles[].campo = disenoFormJson.encabezado.linea3`).
+          example: '{{estudiante.escuela}}'
+        linea4:
+          type: string
+          nullable: true
+          description: Sección, coordinación o despacho específico (opcional). Admite los mismos marcadores `{{id}}` que `linea3`
+          example: DESPACHO DEL DECANO
+    DisenoPiePagina:
+      type: object
+      description: |
+        Pie de página: va al fondo de **cada** hoja. El texto es libre y con formato (`contenido`); si
+        `mostrarPaginacion` es `true`, se agrega una línea «Página X de Y» alineada a la derecha.
+      properties:
+        activo:
+          type: boolean
+          default: true
+          example: true
+        contenido:
+          type: object
+          description: |
+            Árbol del editor (`type: doc`) con el texto del pie. Nodos permitidos:
+            - **`paragraph`** con `attrs.textAlign` (`left`, `center`, `right`; por defecto `center`).
+            - **`text`** con marcas `bold`, `italic`, `underline` y `textStyle` (`attrs.fontSize`: `"7pt"`,
+              `"8pt"`, `"9pt"` o `"10pt"`; sin marca, 8 pt).
+            - **`hardBreak`**: salto de línea dentro del párrafo.
+            Lo demás se ignora (se conserva solo su texto).
+          properties:
+            type:
+              type: string
+              example: doc
+            content:
+              type: array
+              items:
+                type: object
+          example:
+            type: doc
+            content:
+              - type: paragraph
+                attrs:
+                  textAlign: center
+                content:
+                  - type: text
+                    text: '2026: “Año del Fortalecimiento de la Autonomía Universitaria, mediante la Elección Democrática de sus Autoridades”'
+                    marks:
+                      - type: italic
+              - type: paragraph
+                attrs:
+                  textAlign: center
+                content:
+                  - type: text
+                    text: Estafeta Universitario, Panamá, República de Panamá
+              - type: paragraph
+                attrs:
+                  textAlign: center
+                content:
+                  - type: text
+                    text: Teléfono 523-6008-6001
+        mostrarPaginacion:
+          type: boolean
+          default: false
+          example: true
+        lemaOficial:
+          type: string
+          deprecated: true
+          description: |
+            Obsoleto, igual que `direccion` y `telefonos`. Solo se lee si no viene `contenido`.
+        direccion:
+          type: string
+          deprecated: true
+        telefonos:
+          type: string
+          deprecated: true
+    DisenoFormJson:
+      type: object
+      required:
+        - cuerpoDocumento
+      description: |
+        Diseño completo del documento. La vista previa del cliente y el PDF del servidor lo interpretan con las
+        mismas reglas (hoja Carta, márgenes 25/20/20/20 mm).
+
+        **Representación de valores en el documento** (cómo se imprime cada nodo `variable`):
+        - `text`, `textarea`: el texto tal cual (en `textarea` se respetan los saltos de línea).
+        - `number`: el número tal cual se guardó.
+        - `date`: fecha formal en español, `5 de octubre de 2026`.
+        - `select`: la `etiqueta` de la opción elegida; si el valor es `OTRO`, el texto libre de `{id}Otro`.
+        - `checkbox`: `Sí`. El `textoLegal` no se imprime dentro del texto.
+        - Variable opcional sin respuesta o variable automática en `null`: no se imprime nada.
+        - Variable automática: el valor de `variablesSistema` de la solicitud. En la vista previa del constructor
+          se usan datos de ejemplo.
+      properties:
+        formato:
+          $ref: '#/components/schemas/DisenoFormato'
+        encabezado:
+          $ref: '#/components/schemas/DisenoEncabezado'
+        cuerpoDocumento:
+          type: object
+          description: |
+            Árbol AST de TipTap (`type: doc`). Nodos y atributos permitidos:
+            - **`paragraph`** y **`heading`** (`attrs.level` 1 = 16 pt negrita, 2 = 14 pt negrita). Atributos de bloque:
+              `textAlign` (`left`, `center`, `right`, `justify`; por defecto `justify`), `lineHeight`
+              (`"1.0"`, `"1.15"`, `"1.5"`; por defecto el `interlineado` de `formato`) y `indent` (entero ≥ 0,
+              niveles de sangría).
+            - **`text`** con marcas `bold`, `italic`, `underline` y `textStyle` (`attrs.fontFamily`:
+              `"Arial"` o `"Times New Roman"`; `attrs.fontSize`: `"11pt"` o `"12pt"`). Sin marca, rige `formato`.
+            - **`hardBreak`**: salto de línea dentro del mismo párrafo (Shift+Enter).
+            - **`bulletList`**, **`orderedList`** (`attrs.start`, por defecto 1) y **`listItem`**.
+            - **`table`**, **`tableRow`**, **`tableHeader`** y **`tableCell`**. Las celdas admiten `attrs.colspan`
+              y `attrs.rowspan` (enteros ≥ 1, por defecto 1) y `attrs.colwidth` (arreglo de anchos en px o `null`).
+            - **`pageBreak`**: salto de página manual.
+            - **`variable`** (inline, `attrs.id`): referencia a una variable. El `id` es o bien un `id` declarado
+              en `variableFormJson`, o bien una variable automática del sistema (ver `VariablesSistema`).
+            - **`signatureBlock`**: bloque de firmas; como máximo uno por documento. Tiene una casilla por cada paso
+              del flujo con `reqFirma`, en orden de `secuencia`, distribuidas en filas de 2; si queda una sola en la
+              última fila, va centrada (1 firma: centrada; 2: dos columnas; 3: dos arriba y una centrada abajo).
+              Si no cabe en la hoja, se parte entre filas, nunca dentro de una casilla. `attrs.columnas` es opcional y obsoleto: si llega, se ignora.
+          properties:
+            type:
+              type: string
+              example: doc
+            content:
+              type: array
+              items:
+                type: object
+        piePagina:
+          $ref: '#/components/schemas/DisenoPiePagina'
+    VariablesSistema:
+      type: object
+      description: |
+        Valores de las variables automáticas. El backend los resuelve y los **congela al radicar** la solicitud
+        (`POST /api/requests`), así el documento no cambia si después cambian los datos del solicitante.
+        Valen `null` cuando no aplican al solicitante.
+        La vista previa del cliente y el PDF usan estos mismos valores.
+      required:
+        - auth.nombre_completo
+        - auth.cedula
+        - auth.correo
+        - estudiante.carrera
+        - estudiante.escuela
+        - estudiante.facultad
+        - personal.cargo
+        - personal.departamento
+        - sistema.fecha_formal
+        - solicitud.codigo
+      properties:
+        auth.nombre_completo:
+          type: string
+          nullable: true
+          example: Alex Demo
+        auth.cedula:
+          type: string
+          nullable: true
+          example: 9-000-0001
+        auth.correo:
+          type: string
+          nullable: true
+          example: alex.demo@up.ac.pa
+        estudiante.carrera:
+          type: string
+          nullable: true
+          description: Solo estudiantes
+          example: Licenciatura en Ingeniería en Informática
+        estudiante.escuela:
+          type: string
+          nullable: true
+          description: Escuela de la carrera del estudiante (`CarreraResumen.escuela`); solo estudiantes
+          example: Escuela de Ingeniería Informática
+        estudiante.facultad:
+          type: string
+          nullable: true
+          description: 'Tipo y nombre de la unidad del solicitante: `{Tipo} de {nombre}` (hoy siempre `Facultad de …`). Pese al prefijo, aplica a todo solicitante'
+          example: Facultad de Informática, Electrónica y Comunicación
+        personal.cargo:
+          type: string
+          nullable: true
+          description: Cargo de mayor jerarquía entre las asignaciones activas; solo personal con cargo
+          example: Secretaria Administrativa
+        personal.departamento:
+          type: string
+          nullable: true
+          description: Departamento de la asignación de ese cargo; `null` si la asignación no tiene departamento
+          example: Arquitectura y Redes de Computadoras
+        sistema.fecha_formal:
+          type: string
+          nullable: true
+          description: Fecha de radicación ya formateada
+          example: Panamá, 5 de octubre de 2026
+        solicitud.codigo:
+          type: string
+          nullable: true
+          example: UP24-2026-0001
+    EstadoSolicitud:
+      type: string
+      description: Estado del trámite institucional
+      enum:
+        - PENDIENTE
+        - APROBADO
+        - RECHAZADO
+    ResolucionResumen:
+      type: object
+      description: |
+        Cargo que cerró la solicitud (`APROBADO` o `RECHAZADO`), tal como quedó al decidir: no cambia aunque después
+        cambien el cargo o su titular.
+      required:
+        - nombreCargo
+        - fecha
+      properties:
+        nombreCargo:
+          type: string
+          example: Decano/a
+        titular:
+          type: string
+          nullable: true
+          description: Nombre de quien ocupa el cargo; `null` si no hay titular asignado
+          example: Julio Demo
+        fecha:
+          type: string
+          format: date-time
+          example: '2026-10-14T10:15:00Z'
+    PasoDocumento:
+      type: object
+      description: |
+        Paso del flujo de la solicitud (`solicitudes.id_flujo`), alcanzado o no. Sirve para la ruta de
+        aprobación y para dibujar el bloque de firmas: los pasos con `reqFirma` que aún no están `APROBADO`
+        se muestran como «[Pendiente de Aprobación y Firma]» con el titular y el cargo esperados.
+
+        **Historial inmutable:** en un paso ya decidido (`APROBADO` o `RECHAZADO`), `nombreCargo`, `area` y `titular`
+        son los que había al decidir y no cambian aunque después cambien el cargo o la persona. En los pasos
+        pendientes o futuros son los vigentes.
+      required:
+        - secuencia
+        - nombreCargo
+        - area
+        - reqFirma
+        - estado
+      properties:
+        secuencia:
+          type: integer
+          example: 1
+        nombreCargo:
+          type: string
+          example: Director/a de Escuela
+        titular:
+          type: string
+          nullable: true
+          description: Quien ocupa el cargo de la asignación del paso
+          example: Dra. Lia Muestra
+        area:
+          type: string
+          example: Escuela de Ingeniería Informática
+          description: Siempre tiene valor («Área General» si la asignación no define una)
+        reqFirma:
+          type: boolean
+          example: true
+        estado:
+          type: string
+          nullable: true
+          enum:
+            - PENDIENTE
+            - APROBADO
+            - RECHAZADO
+            - null
+          description: Estado del paso (`EstadoAprobacion`); `null` si la solicitud aún no llega a este paso (o ya no llegará, tras un rechazo)
+          example: APROBADO
+        fechaAccion:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-10-06T15:00:00Z'
+        comentario:
+          type: string
+          nullable: true
+          example: Cumple con el reglamento académico.
+        firmaUrl:
+          type: string
+          nullable: true
+          description: 'URL firmada y temporal de la imagen de la firma (el bucket de Storage es privado); solo en pasos aprobados con `reqFirma`. Caduca: no se guarda ni se cachea'
+          example: https://proyecto.supabase.co/storage/v1/object/sign/firmas/12/20261015.png?token=...
+    EstadoAprobacion:
+      type: string
+      description: Estado de un paso individual en el flujo de aprobación
+      enum:
+        - PENDIENTE
+        - APROBADO
+        - RECHAZADO
+  responses:
+    ValidacionFallida:
+      description: Datos de entrada faltantes o con formato inválido (HTTP 400)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: VALIDACION_FALLIDA
+              mensaje: Hay campos requeridos o con formato incorrecto
+              detalles:
+                - campo: password
+                  mensaje: La contraseña es requerida
+    NoAutenticado:
+      description: Token JWT ausente, inválido o expirado (HTTP 401)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: NO_AUTENTICADO
+              mensaje: Sesión no válida o expirada. Inicie sesión nuevamente.
+    CambioPasswordRequerido:
+      description: |
+        La cuenta todavía tiene la contraseña inicial (`debeCambiarPassword: true`): debe cambiarla con
+        `POST /api/auth/password` antes de usar este endpoint (HTTP 403)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: CAMBIO_PASSWORD_REQUERIDO
+              mensaje: Debe cambiar su contraseña inicial antes de continuar.
+    SinPermiso:
+      description: |
+        El usuario autenticado no cuenta con el rol o privilegios requeridos (HTTP 403). Cualquier endpoint puede
+        responder además `403` con `CAMBIO_PASSWORD_REQUERIDO` mientras la cuenta tenga la contraseña inicial.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: SIN_PERMISO
+              mensaje: No cuenta con los privilegios requeridos para realizar esta acción.
+    Conflicto:
+      description: La operación no es válida para el estado actual del recurso (HTTP 409)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: CONFLICTO_ESTADO
+              mensaje: Esta solicitud ya fue resuelta y no puede ser modificada.
+    NoEncontrado:
+      description: El recurso solicitado no existe (HTTP 404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: NO_ENCONTRADO
+              mensaje: El recurso solicitado no fue encontrado.
+    DemasiadasSolicitudes:
+      description: |
+        Límite de peticiones superado (HTTP 429). Cualquier endpoint de la API puede responderlo: 300 peticiones por
+        minuto por usuario (por IP sin sesión). El PDF tiene además 30 descargas cada 10 minutos por usuario.
+      headers:
+        Retry-After:
+          description: Segundos que debe esperar el cliente antes de volver a intentar
+          schema:
+            type: integer
+            example: 60
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: DEMASIADAS_SOLICITUDES
+              mensaje: Ha hecho demasiadas solicitudes seguidas. Espere un momento e intente de nuevo.

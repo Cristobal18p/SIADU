@@ -1,0 +1,11 @@
+{
+  "name": "@siadu/documento",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Motor del documento oficial: convierte disenoFormJson en HTML. Lo usan la vista previa del cliente y el PDF del servidor.",
+  "type": "module",
+  "main": "documento/index.js",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

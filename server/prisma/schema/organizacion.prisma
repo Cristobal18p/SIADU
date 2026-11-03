@@ -1,0 +1,169 @@
+model Unidad {
+  idUnidad      BigInt        @id @default(autoincrement()) @map("id_unidad")
+  codUnidad     Int           @unique @map("cod_unidad")
+  nombre        String        @db.VarChar(200)
+  abrev         String?       @db.VarChar(50)
+  codSede       Int?          @map("cod_sede")
+  codFacultad   Int?          @map("cod_facultad")
+  estado        String        @default("A") @db.Char(1)
+  tipoUnidad    String?       @map("tipo_unidad") @db.VarChar(100)
+  ubicacion     String?       @db.VarChar(255)
+
+  estudiantes   Estudiante[]
+  carreras      Carrera[]
+  asignaciones  AsignacionAdministrativo[]
+  personal      Personal[]
+  departamentos Departamento[]
+  plantillas    Plantilla[]
+  flujos        Flujo[]
+  solicitudes   Solicitud[]
+
+  @@map("unidades")
+}
+
+model Personal {
+  idPersonal    BigInt        @id @default(autoincrement()) @map("id_personal")
+  nombre        String        @db.VarChar(100)
+  apellido      String        @db.VarChar(100)
+  correo        String        @unique @db.VarChar(150)
+  cedula        String?       @unique @db.VarChar(30)
+  telefono      String?       @db.VarChar(50)
+  codUnidad     Int           @map("cod_unidad")
+  estado        String        @default("A") @db.Char(1)
+  idUsuario     BigInt?       @unique @map("id_usuario")
+
+  usuario        Usuario?        @relation(fields: [idUsuario], references: [idUsuario])
+  unidad         Unidad          @relation(fields: [codUnidad], references: [codUnidad])
+  administrativo Administrativo?
+  profesor       Profesor?
+  firmas         Firma[]
+
+  @@map("personal")
+}
+
+model Administrativo {
+  idAdmin       BigInt        @id @default(autoincrement()) @map("id_admin")
+  idPersonal    BigInt        @unique @map("id_personal")
+  estado        String        @default("A") @db.Char(1)
+
+  personal      Personal      @relation(fields: [idPersonal], references: [idPersonal], onDelete: Cascade)
+  asignaciones  AsignacionAdministrativo[]
+
+  @@map("administrativos")
+}
+
+model Profesor {
+  idProfesor    BigInt        @id @default(autoincrement()) @map("id_profesor")
+  idPersonal    BigInt        @unique @map("id_personal")
+  estado        String        @default("A") @db.Char(1)
+
+  personal      Personal      @relation(fields: [idPersonal], references: [idPersonal], onDelete: Cascade)
+
+  @@map("profesores")
+}
+
+model Estudiante {
+  idEstudiante  BigInt        @id @default(autoincrement()) @map("id_estudiante")
+  nombre        String        @db.VarChar(100)
+  apellido      String        @db.VarChar(100)
+  cedula        String?       @unique @db.VarChar(30)
+  correo        String        @unique @db.VarChar(150)
+  codUnidad     Int           @map("cod_unidad")
+  idCarrera     BigInt        @map("id_carrera")
+  estado        String        @default("A") @db.Char(1)
+  idUsuario     BigInt?       @unique @map("id_usuario")
+
+  usuario       Usuario?      @relation(fields: [idUsuario], references: [idUsuario])
+  unidad        Unidad        @relation(fields: [codUnidad], references: [codUnidad])
+  carrera       Carrera       @relation(fields: [idCarrera], references: [idCarrera])
+
+  @@map("estudiantes")
+}
+
+model Cargo {
+  idCargo       Int           @id @default(autoincrement()) @map("id_cargo")
+  nombre        String        @unique @db.VarChar(150)
+  jerarquia     Int           @default(9)
+  estado        String        @default("A") @db.Char(1)
+
+  asignaciones  AsignacionAdministrativo[]
+  pasosFlujo    FlujoPaso[]
+
+  @@map("cargos")
+}
+
+model Area {
+  idArea        BigInt        @id @default(autoincrement()) @map("id_area")
+  nombre        String        @unique @db.VarChar(150)
+
+  asignaciones  AsignacionAdministrativo[]
+
+  @@map("areas")
+}
+
+model Carrera {
+  idCarrera       BigInt        @id @default(autoincrement()) @map("id_carrera")
+  codUnidad       Int           @map("cod_unidad")
+  descripcion     String        @db.VarChar(255)
+  codDepartamento Int?          @map("cod_departamento")
+  codEscuela      Int?          @map("cod_escuela")
+
+  unidad          Unidad        @relation(fields: [codUnidad], references: [codUnidad])
+  escuela         Escuela?      @relation(fields: [codUnidad, codDepartamento, codEscuela], references: [codUnidad, codDepartamento, codEscuela])
+  estudiantes     Estudiante[]
+
+  @@map("carreras")
+}
+
+model Departamento {
+  idDepartamento  BigInt      @id @default(autoincrement()) @map("id_departamento")
+  codDepartamento Int         @map("cod_departamento")
+  codUnidad       Int         @map("cod_unidad")
+  nombre          String      @db.VarChar(200)
+  estado          String      @default("A") @db.Char(1)
+
+  unidad          Unidad      @relation(fields: [codUnidad], references: [codUnidad])
+  escuelas        Escuela[]
+  asignaciones    AsignacionAdministrativo[]
+
+  @@unique([codUnidad, codDepartamento], map: "uk_departamento_unidad")
+  @@map("departamentos")
+}
+
+model Escuela {
+  idEscuela       BigInt       @id @default(autoincrement()) @map("id_escuela")
+  codEscuela      Int          @map("cod_escuela")
+  nombre          String       @db.VarChar(200)
+  codUnidad       Int          @map("cod_unidad")
+  codDepartamento Int          @map("cod_departamento")
+  estado          String       @default("A") @db.Char(1)
+
+  departamento    Departamento @relation(fields: [codUnidad, codDepartamento], references: [codUnidad, codDepartamento])
+  carreras        Carrera[]
+  asignaciones    AsignacionAdministrativo[]
+
+  @@unique([codUnidad, codDepartamento, codEscuela], map: "uk_escuela_departamento")
+  @@map("escuelas")
+}
+
+model AsignacionAdministrativo {
+  idAsignacion    BigInt      @id @default(autoincrement()) @map("id_asignacion")
+  idAdmin         BigInt      @map("id_admin")
+  codUnidad       Int         @map("cod_unidad")
+  idCargo         Int         @map("id_cargo")
+  idArea          BigInt?     @map("id_area")
+  codDepartamento Int?        @map("cod_departamento")
+  codEscuela      Int?        @map("cod_escuela")
+  estado          String      @default("A") @db.Char(1)
+
+  administrativo  Administrativo @relation(fields: [idAdmin], references: [idAdmin], onDelete: Cascade)
+  cargo           Cargo          @relation(fields: [idCargo], references: [idCargo])
+  unidad          Unidad         @relation(fields: [codUnidad], references: [codUnidad])
+  area            Area?          @relation(fields: [idArea], references: [idArea])
+  departamento    Departamento?  @relation(fields: [codUnidad, codDepartamento], references: [codUnidad, codDepartamento])
+  escuela         Escuela?       @relation(fields: [codUnidad, codDepartamento, codEscuela], references: [codUnidad, codDepartamento, codEscuela])
+  pasosFlujo      FlujoPaso[]
+  pasosSolicitud  SolicitudPaso[]
+
+  @@map("asignaciones_administrativos")
+}

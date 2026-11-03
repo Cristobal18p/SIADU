@@ -1,0 +1,8 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"] // carga las relaciones con un solo JOIN (relationLoadStrategy: "join")
+}
+
+datasource db {
+  provider = "postgresql"
+}

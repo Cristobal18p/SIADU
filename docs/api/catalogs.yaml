@@ -1,0 +1,350 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Catálogos y Flujos de Aprobación
+  description: |
+    Catálogos de consulta y administración de flujos de aprobación reutilizables.
+    Aislados por unidad académica (`codUnidad`) para garantizar multi-tenancy.
+    Todos los datos utilizan estrictamente la convención **`camelCase`**.
+
+    **Ciclo de vida de un flujo** (`EstadoFlujo`):
+    - Un flujo nuevo nace en `BORRADOR` (`POST /api/flows`) y pertenece a la versión de plantilla en borrador que lo
+      usa. Mientras es borrador se edita con `PUT /api/flows/{id}`.
+    - Se vuelve `ACTIVO` cuando se publica la plantilla que lo usa (`POST /api/templates/{id}/publish`). Un flujo
+      `ACTIVO` no cambia de estructura (no se agregan, quitan ni reordenan pasos): para eso se crea otro flujo.
+      Solo los flujos `ACTIVO` se pueden reutilizar en otras plantillas.
+    - El cambio de titular de un cargo no se hace desde la API: las asignaciones se cargan fuera del sistema.
+      Los pasos de un flujo `ACTIVO` pueden pasar a otra persona del **mismo puesto** (mismo cargo, unidad y área), y el
+      historial de lo ya decidido se conserva.
+
+    **Quién puede ser aprobador:** solo un cargo cuyo titular tenga cuenta activa, persona y asignación activas, y el
+    rol `APROBADOR` (`CargoResumen.esAprobador`). El servidor lo valida al crear y editar un flujo y al publicar. El
+    paso que solo revisa y no firma lleva `reqFirma: false` (visto bueno).
+
+    **Alcance por unidad:** el administrador trabaja únicamente con la unidad a la que pertenece. `codUnidad`
+    (parámetro o cuerpo) es opcional y, si se envía, debe ser la propia: con otra unidad responde `403`
+    (`SIN_PERMISO`). Un flujo de otra unidad responde `404`.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Catalogs
+    description: Catálogos institucionales para selección de autoridades y áreas
+  - name: Flows
+    description: Gestión de cadenas secuenciales de aprobación reutilizables
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/catalogs/cargos:
+    get:
+      tags: [Catalogs]
+      operationId: listCargos
+      summary: Obtener cargos vigentes con sus titulares actuales
+      description: |
+        Retorna la lista de cargos y autoridades asignadas en la unidad para configurar flujos o mostrar firmas.
+        Con `soloAprobadores=true` devuelve únicamente los cargos cuyo titular puede ser aprobador
+        (`esAprobador: true`); el constructor de flujos siempre lo envía así.
+
+        Solo incluye los cargos de autoridad de la unidad: Decano/a, Vicedecano/a, Director/a de Escuela, Director/a de
+        Departamento, la Secretaría Administrativa y las secretarias de cada director. Las que tienen escuela
+        (`escuela` distinto de `null`) permiten un paso `ESCUELA_SOLICITANTE` del flujo, que resuelve al titular según
+        la carrera del solicitante.
+      x-roles: [SOLICITANTE, APROBADOR, ADMINISTRADOR]
+      parameters:
+        - in: query
+          name: codUnidad
+          required: false
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica. Solo se admite la unidad del usuario (si se omite, se deduce del token JWT); otra unidad responde `403`
+        - in: query
+          name: soloAprobadores
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Si es `true`, solo cargos con titular con cuenta activa y rol `APROBADOR`
+      responses:
+        "200":
+          description: Lista de cargos y titulares disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "./common.yaml#/components/schemas/CargoResumen"
+              example:
+                - idAsignacion: 12
+                  idCargo: 14
+                  nombreCargo: "Director/a de Escuela"
+                  titularActual: "Dra. Lia Muestra"
+                  idUsuarioTitular: 31
+                  area: "Escuela de Ingeniería Informática"
+                  escuela: "Escuela de Ingeniería Informática"
+                  esAprobador: true
+                - idAsignacion: 1
+                  idCargo: 1
+                  nombreCargo: "Decano"
+                  titularActual: "Dr. Julio Demo"
+                  idUsuarioTitular: null
+                  area: "Decanato"
+                  escuela: null
+                  esAprobador: false
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+
+  /api/flows:
+    get:
+      tags: [Flows]
+      operationId: listFlows
+      summary: Listar flujos de aprobación reutilizables de la unidad
+      description: |
+        Consulta los flujos `ACTIVO` de la unidad académica del administrador, los que se pueden reutilizar al
+        armar una plantilla. Los flujos en `BORRADOR` no aparecen: pertenecen a una versión de plantilla en edición.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: query
+          name: codUnidad
+          required: false
+          schema:
+            type: integer
+            example: 24
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        "200":
+          description: Lista de flujos de aprobación disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [idFlujo, nombre, codigo, totalPasos, pasosResumen]
+                  properties:
+                    idFlujo:
+                      type: integer
+                      example: 1
+                    nombre:
+                      type: string
+                      example: "Aprobación Estándar FIEC (Escuela + Decanato)"
+                    codigo:
+                      type: string
+                      example: "FLUJO-FIEC-ESC-DEC"
+                    totalPasos:
+                      type: integer
+                      example: 2
+                    pasosResumen:
+                      type: array
+                      items: { type: string }
+                      description: Nombre del cargo de cada paso, en orden; un paso por escuela lleva el sufijo « (del solicitante)»
+                      example: ["Director/a de Escuela (del solicitante)", "Decano/a"]
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+
+    post:
+      tags: [Flows]
+      operationId: createFlow
+      summary: Crear un nuevo flujo de aprobación (en borrador)
+      description: |
+        Registra una cadena secuencial de firmas en estado `BORRADOR`. Pasa a `ACTIVO` y queda reutilizable cuando se
+        publica la plantilla que lo usa. Para cambiar la estructura de un flujo `ACTIVO` se crea un flujo nuevo con
+        este endpoint (el cliente puede partir de los pasos del existente).
+
+        Los pasos llevan secuencias únicas y consecutivas desde 1. Un paso `FIJO` lleva `idAsignacion`, que debe ser
+        una asignación vigente de la unidad (`400` si no). Un paso `ESCUELA_SOLICITANTE` lleva `idCargo` (un cargo con
+        escuela, `CargoResumen.escuela`) y no `idAsignacion`: el titular se resuelve al radicar según la escuela de la
+        carrera del solicitante (ver `PasoFlujo`). Las reglas de aprobador y de personas distintas de abajo se aplican
+        a los pasos `FIJO`; en los de escuela se comprueban al publicar y al radicar, con el titular de cada escuela.
+        Un paso mal formado responde `400` (`VALIDACION_FALLIDA`): `FIJO` sin `idAsignacion`, `ESCUELA_SOLICITANTE` sin
+        `idCargo` o con un cargo que no tiene escuela (`detalles[].campo = pasos[i].idCargo`), un paso con ambos
+        identificadores, o el mismo cargo por escuela repetido en el flujo. El `codigo` es único: `409` (`CONFLICTO_ESTADO`) si ya existe.
+
+        **Solo aprobadores:** el titular de cada asignación debe tener cuenta activa y el rol `APROBADOR`
+        (`CargoResumen.esAprobador`). Si no, `400` (`APROBADOR_INVALIDO`) con `detalles[].campo = pasos[i].idAsignacion`
+        en el paso afectado.
+
+        **Personas distintas (estricto):** cada persona aparece una sola vez en el flujo. No se puede repetir el
+        `idAsignacion` ni el titular de la asignación (`idUsuarioTitular` de `CargoResumen`), aunque sean cargos
+        distintos de la misma persona. Si se repite, `400` (`VALIDACION_FALLIDA`) con
+        `detalles[].campo = pasos[i].idAsignacion` en el paso repetido. La regla se vuelve a comprobar al **publicar**
+        una plantilla con el flujo (`409` si un cambio de titulares dejó a una persona en dos pasos).
+
+        **Orden estricto:** las aprobaciones siguen el orden de `secuencia`. El paso siguiente se crea solo cuando
+        el anterior aprueba; nadie resuelve un paso que no le corresponde ni antes de su turno, y un rechazo cierra
+        la solicitud.
+      x-roles: [ADMINISTRADOR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre, codigo, codUnidad, pasos]
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 150
+                  example: "Aprobación Consejo de Facultad"
+                codigo:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+                  description: Único. Alfanumérico con guiones
+                  example: "FLUJO-FIEC-CONSEJO"
+                descripcion:
+                  type: string
+                  example: "Flujo que pasa por Escuela y Decanato"
+                codUnidad:
+                  type: integer
+                  description: Unidad del administrador; con otra responde `403`
+                  example: 24
+                pasos:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "./common.yaml#/components/schemas/PasoFlujo"
+      responses:
+        "201":
+          description: Flujo creado en borrador
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idFlujo, codigo, estado, totalPasos, mensaje]
+                properties:
+                  idFlujo:    { type: integer, example: 2 }
+                  codigo:     { type: string, example: "FLUJO-FIEC-CONSEJO" }
+                  estado:     { $ref: "./common.yaml#/components/schemas/EstadoFlujo" }
+                  totalPasos: { type: integer, example: 2 }
+                  mensaje:    { type: string, example: "Flujo creado exitosamente." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/flows/{id}:
+    get:
+      tags: [Flows]
+      operationId: getFlow
+      summary: Detalle de un flujo de aprobación
+      description: |
+        Devuelve el estado y los pasos del flujo con su `idAsignacion`, cargo y titular. Permite reutilizar un flujo
+        existente en el constructor y mostrar su cadena completa.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador del flujo
+      responses:
+        "200":
+          description: Flujo con sus pasos ordenados por `secuencia`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idFlujo, nombre, codigo, estado, codUnidad, pasos]
+                properties:
+                  idFlujo:     { type: integer, example: 1 }
+                  nombre:      { type: string, example: "Aprobación Estándar FIEC (Escuela + Decanato)" }
+                  codigo:      { type: string, example: "FLUJO-FIEC-ESC-DEC" }
+                  estado:      { $ref: "./common.yaml#/components/schemas/EstadoFlujo" }
+                  descripcion: { type: string, nullable: true, example: "Flujo que pasa por Escuela y Decanato" }
+                  codUnidad:   { type: integer, example: 24 }
+                  pasos:
+                    type: array
+                    items:
+                      $ref: "./common.yaml#/components/schemas/PasoFlujo"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+
+    put:
+      tags: [Flows]
+      operationId: updateFlow
+      summary: Editar un flujo en borrador
+      description: |
+        Reemplaza el nombre, la descripción y **todos** los pasos de un flujo en `BORRADOR`. El `codigo` y la
+        `codUnidad` no se pueden cambiar. Aplican las mismas validaciones que al crear (secuencias consecutivas,
+        asignaciones vigentes de la unidad, solo aprobadores, personas distintas).
+
+        Un flujo `ACTIVO` no se edita: responde `409` (`CONFLICTO_ESTADO`) y hay que crear otro flujo.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador del flujo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre, pasos]
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 150
+                  example: "Aprobación Consejo de Facultad (revisada)"
+                descripcion:
+                  type: string
+                  nullable: true
+                  example: "Flujo que pasa por Escuela, Vicedecanato y Decanato"
+                pasos:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "./common.yaml#/components/schemas/PasoFlujo"
+      responses:
+        "200":
+          description: Flujo en borrador actualizado
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idFlujo, codigo, estado, totalPasos, mensaje]
+                properties:
+                  idFlujo:    { type: integer, example: 2 }
+                  codigo:     { type: string, example: "FLUJO-FIEC-CONSEJO" }
+                  estado:     { $ref: "./common.yaml#/components/schemas/EstadoFlujo" }
+                  totalPasos: { type: integer, example: 3 }
+                  mensaje:    { type: string, example: "Flujo actualizado exitosamente." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

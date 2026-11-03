@@ -1,0 +1,203 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Aprobaciones y Firmas
+  description: |
+    Bandeja de entrada para autoridades institucionales y toma de decisiones
+    (Aprobación con firma digitalizada o Rechazo formal con justificación).
+    Todos los payloads utilizan estrictamente la convención **`camelCase`**.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Approvals
+    description: Bandeja de entrada de autoridades y resoluciones de trámites
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/approvals/pending:
+    get:
+      tags: [Approvals]
+      operationId: listPendingApprovals
+      summary: Bandeja de trámites pendientes para la autoridad
+      description: |
+        Retorna las solicitudes que están actualmente asignadas a la autoridad autenticada en el paso activo,
+        en espera de su revisión y resolución. Es una lista personal: se devuelve como arreglo plano.
+      x-roles: [APROBADOR]
+      responses:
+        "200":
+          description: Lista de solicitudes pendientes en la bandeja de entrada
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [idAprobacion, idSolicitud, codigoDocumento, nombrePlantilla, solicitanteNombre, solicitanteCedula, fechaAsignacion]
+                  properties:
+                    idAprobacion:      { type: integer, example: 45 }
+                    idSolicitud:       { type: integer, example: 101 }
+                    codigoDocumento:   { type: string, example: "UP24-2026-0001" }
+                    nombrePlantilla:   { type: string, example: "Solicitud de Retiro de Asignatura" }
+                    solicitanteNombre: { type: string, example: "Alex Demo" }
+                    solicitanteCedula: { type: string, example: "9-000-0001" }
+                    fechaAsignacion:   { type: string, format: date-time, example: "2026-10-06T13:35:00Z" }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+
+  /api/approvals/history:
+    get:
+      tags: [Approvals]
+      operationId: listApprovalHistory
+      summary: Historial de resoluciones de la autoridad (Paginado)
+      description: |
+        Lista las decisiones ya emitidas (`APROBADO` o `RECHAZADO`) por la autoridad autenticada,
+        de la más reciente a la más antigua. Sirve para el historial de resoluciones y para los
+        indicadores del panel: el total de resueltos en un periodo se obtiene con `desde`/`hasta` y `total`.
+        Una `decision` fuera del enum o una fecha inválida en `desde`/`hasta` responde `400`.
+      x-roles: [APROBADOR]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+          description: Número de página actual
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, minimum: 1, maximum: 50 }
+          description: Cantidad de resoluciones por página
+        - in: query
+          name: decision
+          schema: { type: string, enum: [APROBADO, RECHAZADO] }
+          description: Filtrar por tipo de decisión
+        - in: query
+          name: desde
+          schema: { type: string, format: date-time }
+          description: Incluye solo resoluciones con `fechaAccion` igual o posterior
+        - in: query
+          name: hasta
+          schema: { type: string, format: date-time }
+          description: Incluye solo resoluciones con `fechaAccion` anterior a este valor
+      responses:
+        "200":
+          description: Lista paginada de resoluciones emitidas por la autoridad
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, pagina, limite, totalPaginas, datos]
+                properties:
+                  total:        { type: integer, example: 12 }
+                  pagina:       { type: integer, example: 1 }
+                  limite:       { type: integer, example: 10 }
+                  totalPaginas: { type: integer, example: 2 }
+                  datos:
+                    type: array
+                    items:
+                      type: object
+                      required: [idAprobacion, idSolicitud, codigoDocumento, nombrePlantilla, solicitanteNombre, solicitanteCedula, decision, fechaAccion]
+                      properties:
+                        idAprobacion:      { type: integer, example: 45 }
+                        idSolicitud:       { type: integer, example: 101 }
+                        codigoDocumento:   { type: string, example: "UP24-2026-0001" }
+                        nombrePlantilla:   { type: string, example: "Solicitud de Retiro de Asignatura" }
+                        solicitanteNombre: { type: string, example: "Alex Demo" }
+                        solicitanteCedula: { type: string, example: "9-000-0001" }
+                        decision:          { $ref: "./common.yaml#/components/schemas/EstadoAprobacion" }
+                        comentario:        { type: string, nullable: true, example: "Revisado y conforme con los estatutos universitarios." }
+                        fechaAccion:       { type: string, format: date-time, example: "2026-10-06T16:00:00Z" }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+
+  /api/approvals/{id}/decision:
+    post:
+      tags: [Approvals]
+      operationId: decideApproval
+      summary: Emitir decisión sobre un trámite (Aprobar o Rechazar)
+      description: |
+        La autoridad registra su decisión formal.
+        - Si aprueba: se vincula su firma digital y, si es el último paso, la solicitud finaliza en `APROBADO`.
+          Si hay más pasos, se crea el siguiente.
+        - Si rechaza: el comentario es obligatorio y la solicitud finaliza de inmediato en `RECHAZADO`.
+
+        **Paso siguiente:** al aprobar, si el titular del paso siguiente ya no puede aprobar (cuenta, persona o
+        asignación inactivas, o sin el rol `APROBADOR`), responde `409` (`APROBADOR_INVALIDO`) y **la decisión no se
+        registra**: la solicitud sigue pendiente en este paso hasta que se corrijan los datos del cargo.
+
+        **Firma:** al aprobar un paso con `reqFirma` se vincula la única firma activa del aprobador. Si no tiene
+        ninguna, la aprobación se registra igual como visto bueno, sin firma: el documento no muestra imagen para
+        ese paso (`firmaUrl` nulo). No es un error.
+
+        **Quién puede decidir:** solo el usuario al que está asignada la aprobación; para cualquier otro, o si el id no
+        existe, responde `404`. Responde `409` (`CONFLICTO_ESTADO`) si el paso ya fue decidido o si la solicitud ya no
+        está `PENDIENTE`.
+
+        **Historial inmutable:** al decidir se guardan el cargo, el área y el nombre y la cédula de quien decide. Una
+        aprobación decidida no se puede modificar ni borrar; si después cambian el cargo o la persona, el historial
+        sigue mostrando lo que había al decidir.
+      x-roles: [APROBADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador del paso de aprobación (`idAprobacion`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [APROBADO, RECHAZADO]
+                  example: "APROBADO"
+                comentario:
+                  type: string
+                  maxLength: 1000
+                  description: Observaciones o justificación formal (obligatorio en caso de rechazo); más de 1000 caracteres responde `400`
+                  example: "Revisado y conforme con los estatutos universitarios."
+      responses:
+        "200":
+          description: Resolución registrada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idAprobacion, estadoAprobacion, estadoSolicitud, fechaAccion, solicitudFinalizada, mensaje]
+                properties:
+                  idAprobacion:        { type: integer, example: 45 }
+                  estadoAprobacion:    { $ref: "./common.yaml#/components/schemas/EstadoAprobacion" }
+                  estadoSolicitud:     { $ref: "./common.yaml#/components/schemas/EstadoSolicitud" }
+                  fechaAccion:         { type: string, format: date-time, example: "2026-10-06T16:00:00Z" }
+                  solicitudFinalizada: { type: boolean, example: false }
+                  mensaje:             { type: string, example: "Decisión registrada exitosamente." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

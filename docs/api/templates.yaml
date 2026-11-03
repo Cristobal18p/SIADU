@@ -1,0 +1,638 @@
+openapi: 3.0.3
+
+info:
+  title: SIADU — Módulo de Plantillas y Constructor Documental
+  description: |
+    Gestión del ciclo de vida de plantillas de documentos universitarios, versionado inmutable,
+    editor TipTap y catálogo de trámites para solicitantes.
+    Todos los payloads utilizan estrictamente la convención **`camelCase`**.
+
+    **Flujo de una plantilla (`idFlujo`):** una versión referencia un flujo de `GET /api/flows` (`ACTIVO`, reutilizable)
+    o uno propio en `BORRADOR` creado con `POST /api/flows`. Un flujo en borrador pertenece a una sola versión: la
+    primera versión en borrador que lo referencia pasa a ser su dueña, y otra versión que lo referencie recibe `409`.
+    El flujo debe ser de la misma unidad que la plantilla (`400` si no).
+
+    **Alcance por unidad:**
+    - **Administrador:** trabaja solo con las plantillas de su unidad. `codUnidad` (parámetro o cuerpo) es opcional y,
+      si se envía, debe ser la propia: con otra unidad responde `403` (`SIN_PERMISO`). Una plantilla de otra unidad
+      responde `404`.
+    - **Solicitante:** solo ve y solicita plantillas `ACTIVO` de **su unidad** cuya `audiencia` incluya alguno de sus
+      estamentos (una persona que es profesor y administrativo ve las de ambos). Cualquier otra plantilla le responde
+      `404`, como si no existiera. En esta etapa no hay formularios dirigidos a otra unidad.
+
+    **Ciclo de una versión:** `BORRADOR` → `ACTIVO` (publicar) → `INACTIVO` (publicar otra versión o desactivar).
+    Desactivar solo retira la versión del catálogo para solicitudes nuevas; las solicitudes en proceso conservan su
+    versión y su flujo y terminan normalmente.
+    Mientras una plantilla nunca se ha publicado (su única versión es la 1, en `BORRADOR`), se le puede cambiar la
+    `audiencia` y se puede eliminar; después, la audiencia queda fija y la plantilla solo se desactiva.
+  version: 2.12.0
+
+servers:
+  - url: http://localhost:7001
+    description: Servidor de desarrollo local
+
+tags:
+  - name: Templates
+    description: Inventario administrativo, constructor y catálogo de solicitudes
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/templates:
+    get:
+      tags: [Templates]
+      operationId: listTemplates
+      summary: Inventario de plantillas para administradores (Paginado)
+      description: |
+        Lista todas las plantillas registradas en la unidad con sus estados (`ACTIVO`, `BORRADOR`, `INACTIVO`),
+        ordenadas por `fechaActualizacion` de la más reciente a la más antigua.
+        Incluye paginación eficiente para evitar transferencias excesivas de datos.
+        Cada plantilla se lista una sola vez con su versión vigente (la `ACTIVO`; si no hay, la de mayor número).
+        Para los indicadores por estado del panel de inicio use `GET /api/templates/summary`, que los devuelve en una
+        sola llamada. (Consultar con `estado=ACTIVO|BORRADOR|INACTIVO` y `limit=1` y leer `total` da los mismos números.)
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+          description: Número de página actual
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, minimum: 1, maximum: 50 }
+          description: Cantidad de plantillas por página
+        - in: query
+          name: estado
+          schema: { type: string, default: "TODOS", enum: [TODOS, ACTIVO, BORRADOR, INACTIVO] }
+          description: Filtrar por el estado de la versión vigente (la `ACTIVO`; si no hay, la de mayor número)
+        - in: query
+          name: search
+          schema: { type: string }
+          description: Búsqueda textual por nombre o descripción de la plantilla
+        - in: query
+          name: codUnidad
+          schema: { type: integer, example: 24 }
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        "200":
+          description: Lista paginada de plantillas para el panel de administración
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, pagina, limite, totalPaginas, datos]
+                properties:
+                  total:        { type: integer, example: 15 }
+                  pagina:       { type: integer, example: 1 }
+                  limite:       { type: integer, example: 10 }
+                  totalPaginas: { type: integer, example: 2 }
+                  datos:
+                    type: array
+                    items:
+                      type: object
+                      required: [idPlantilla, nombre, audiencia, numeroVersion, estadoVersion, fechaActualizacion]
+                      properties:
+                        idPlantilla:        { type: integer, example: 5 }
+                        nombre:             { type: string, example: "Solicitud de Retiro de Asignatura" }
+                        descripcion:        { type: string, nullable: true, example: "Trámite de retiro formal de materias en la FIEC" }
+                        codUnidad:          { type: integer, example: 24 }
+                        audiencia:
+                          type: array
+                          items: { $ref: "./common.yaml#/components/schemas/Estamento" }
+                          example: ["ESTUDIANTE"]
+                        numeroVersion:      { type: integer, description: "Número de la versión listada, la misma a la que corresponde `estadoVersion`", example: 2 }
+                        estadoVersion:      { $ref: "./common.yaml#/components/schemas/EstadoVersion" }
+                        idVersionBorrador:
+                          type: integer
+                          nullable: true
+                          description: |
+                            Versión en `BORRADOR` de la plantilla, si existe. Cuando la listada es `ACTIVO` y ya hay un
+                            borrador en curso, permite abrir ese borrador en lugar de crear una versión nueva.
+                          example: 14
+                        fechaActualizacion:
+                          type: string
+                          format: date-time
+                          description: |
+                            Fecha de publicación de la versión; si no se ha publicado, la fecha de registro de la plantilla.
+                            No refleja la última edición de un borrador: la base de datos no la guarda.
+                          example: "2026-10-05T14:20:00Z"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+
+    post:
+      tags: [Templates]
+      operationId: createTemplate
+      summary: Crear nueva plantilla con versión inicial (Borrador)
+      description: |
+        Crea la cabecera de la plantilla y su primera versión en estado `BORRADOR`.
+        La transacción atómica se realiza de forma segura mediante Prisma.
+        Un borrador puede guardarse incompleto: `variableFormJson` con `variables: []`, un `cuerpoDocumento`
+        mínimo y sin `idFlujo`. Las exigencias del documento y del flujo se verifican al publicar.
+      x-roles: [ADMINISTRADOR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre, codUnidad, audiencia, variableFormJson, disenoFormJson]
+              properties:
+                nombre:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  example: "Solicitud de Reclamo de Calificación"
+                descripcion:
+                  type: string
+                  nullable: true
+                  example: "Reclamos sobre calificaciones de exámenes parciales o finales"
+                codUnidad:
+                  type: integer
+                  description: Unidad del administrador; con otra responde `403`
+                  example: 24
+                audiencia:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { $ref: "./common.yaml#/components/schemas/Estamento" }
+                  example: ["ESTUDIANTE"]
+                idFlujo:
+                  type: integer
+                  nullable: true
+                  description: Flujo `ACTIVO` reutilizable o flujo `BORRADOR` sin dueño de la misma unidad. Opcional en un borrador
+                  example: 1
+                variableFormJson:
+                  $ref: "./common.yaml#/components/schemas/VariableFormJson"
+                disenoFormJson:
+                  $ref: "./common.yaml#/components/schemas/DisenoFormJson"
+      responses:
+        "201":
+          description: Plantilla y versión inicial creadas exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla:   { type: integer, example: 6 }
+                  idVersion:     { type: integer, example: 13 }
+                  numeroVersion: { type: integer, example: 1 }
+                  estado:        { type: string, example: "BORRADOR" }
+                  mensaje:       { type: string, example: "Plantilla creada en borrador exitosamente." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/templates/catalog:
+    get:
+      tags: [Templates]
+      operationId: getCatalog
+      summary: Catálogo de trámites disponibles para el solicitante
+      description: |
+        Retorna exclusivamente las plantillas con una versión `ACTIVO` de la unidad (`codUnidad`) del usuario
+        autenticado cuya `audiencia` incluye alguno de sus estamentos (`estamentos`): un estudiante solo ve las
+        dirigidas a estudiantes, un profesor las de profesores y un administrativo las de administrativos; quien
+        tiene dos estamentos ve las de ambos.
+      x-roles: [SOLICITANTE]
+      responses:
+        "200":
+          description: Catálogo de trámites que el solicitante puede iniciar
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [idPlantilla, nombre, descripcion, codUnidad, idVersion]
+                  properties:
+                    idPlantilla: { type: integer, example: 5 }
+                    nombre:      { type: string, example: "Solicitud de Retiro de Asignatura" }
+                    descripcion: { type: string, description: "Cadena vacía si la plantilla no tiene descripción", example: "Permite solicitar el retiro de una o más materias del semestre en curso." }
+                    codUnidad:   { type: integer, example: 24 }
+                    idVersion:   { type: integer, example: 12 }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+
+  /api/templates/summary:
+    get:
+      tags: [Templates]
+      operationId: getTemplatesSummary
+      summary: Resumen de plantillas por estado (indicadores del inicio)
+      description: |
+        Cuenta las plantillas de la unidad según el estado de su **versión vigente** (la `ACTIVO`; si no hay, la de
+        mayor número), con los mismos criterios que el filtro `estado` de `GET /api/templates`: los totales coinciden
+        con el `total` de cada una de esas consultas. Reemplaza las cuatro llamadas que hacía el panel de inicio
+        (`TODOS` y los tres estados con `limit=1`) por una sola.
+
+        - `total`: todas las plantillas de la unidad.
+        - `activas`: la versión vigente está `ACTIVO`.
+        - `borradores`: no hay versión `ACTIVO` y la vigente es un `BORRADOR` (plantilla nunca publicada).
+        - `inactivas`: no hay versión `ACTIVO` ni `BORRADOR`; todas las versiones están `INACTIVO`.
+
+        Una plantilla activa que tiene además un borrador en curso cuenta solo como activa (`GET /api/templates` la
+        informa con `idVersionBorrador`).
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: query
+          name: codUnidad
+          schema: { type: integer, example: 24 }
+          description: Código de la unidad académica; solo la del administrador (otra responde `403`)
+      responses:
+        "200":
+          description: Conteo de plantillas por estado
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, activas, borradores, inactivas]
+                properties:
+                  total:      { type: integer, minimum: 0, example: 12 }
+                  activas:    { type: integer, minimum: 0, example: 7 }
+                  borradores: { type: integer, minimum: 0, example: 3 }
+                  inactivas:  { type: integer, minimum: 0, example: 2 }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+
+  /api/templates/{id}:
+    get:
+      tags: [Templates]
+      operationId: getTemplate
+      summary: Cargar plantilla completa (Constructor o Formulario Web)
+      description: |
+        Obtiene la definición integral de la plantilla: diseño TipTap, variables dinámicas
+        del formulario web y el flujo de firmas asociado.
+        Si el usuario es un solicitante, solo puede consultar versiones publicadas (`ACTIVO`) de su unidad cuya
+        `audiencia` incluya alguno de sus estamentos; cualquier otra versión le responde `404`, como si no existiera.
+        Si es administrador, solo las plantillas de su unidad (otra responde `404`).
+        Toda versión `ACTIVO` tiene flujo de aprobación porque no se puede publicar sin él: `flujo` solo
+        es `null` en versiones en `BORRADOR`.
+      x-roles: [ADMINISTRADOR, SOLICITANTE]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador único de la plantilla
+        - in: query
+          name: idVersion
+          required: false
+          schema: { type: integer }
+          description: |
+            Versión específica a consultar. Si se omite, devuelve la versión `ACTIVO`; si no hay, la de mayor
+            `numeroVersion` (la misma que lista el inventario).
+      responses:
+        "200":
+          description: Plantilla completa con AST TipTap y variables
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idPlantilla, nombre, codUnidad, audiencia, idVersion, numeroVersion, estado, variableFormJson, disenoFormJson]
+                properties:
+                  idPlantilla:      { type: integer, example: 5 }
+                  nombre:           { type: string, example: "Solicitud de Retiro de Asignatura" }
+                  descripcion:      { type: string, nullable: true, example: "Trámite de retiro de asignaturas" }
+                  codUnidad:        { type: integer, example: 24 }
+                  audiencia:
+                    type: array
+                    items: { $ref: "./common.yaml#/components/schemas/Estamento" }
+                    example: ["ESTUDIANTE"]
+                  idVersion:        { type: integer, example: 12 }
+                  numeroVersion:    { type: integer, example: 1 }
+                  estado:           { $ref: "./common.yaml#/components/schemas/EstadoVersion" }
+                  fechaPublicacion: { type: string, format: date-time, nullable: true, description: "`null` si la versión nunca se publicó", example: "2026-10-05T14:20:00Z" }
+                  versionBorrador:
+                    type: object
+                    nullable: true
+                    description: |
+                      Solo para el administrador: versión en `BORRADOR` de la plantilla, si existe (puede ser la misma
+                      consultada). `null` si no hay borrador. Para un solicitante siempre es `null`.
+                    required: [idVersion, numeroVersion]
+                    properties:
+                      idVersion:     { type: integer, example: 14 }
+                      numeroVersion: { type: integer, example: 2 }
+                  variablesSistema:
+                    type: object
+                    nullable: true
+                    description: |
+                      Solo para el **solicitante** (rol SOLICITANTE): los datos automáticos que el documento usaría si
+                      radicara ahora, con sus datos de perfil. Es una vista previa: el backend los vuelve a resolver
+                      y congela al radicar (`POST /api/requests`). El cliente los muestra tal cual, sin calcularlos.
+                      `null` para el administrador o si la versión no es publicada.
+                    allOf: [{ $ref: "./common.yaml#/components/schemas/VariablesSistema" }]
+                  variableFormJson: { $ref: "./common.yaml#/components/schemas/VariableFormJson" }
+                  disenoFormJson:   { $ref: "./common.yaml#/components/schemas/DisenoFormJson" }
+                  flujo:
+                    type: object
+                    nullable: true
+                    description: |
+                      Cadena de aprobación; `null` solo en borradores sin flujo asignado. Los pasos
+                      `ESCUELA_SOLICITANTE` llegan sin resolver al administrador y resueltos con la escuela de la
+                      carrera del usuario cuando lo pide un solicitante (así el bloque de firmas de la vista previa
+                      muestra al director que de verdad firmará su trámite).
+                    required: [idFlujo, nombre, codigo, estado, pasos]
+                    properties:
+                      idFlujo: { type: integer, example: 1 }
+                      nombre:  { type: string, example: "Aprobación Estándar FIEC (Escuela + Decanato)" }
+                      codigo:  { type: string, example: "FLUJO-FIEC-ESC-DEC" }
+                      estado:  { $ref: "./common.yaml#/components/schemas/EstadoFlujo" }
+                      pasos:
+                        type: array
+                        items: { $ref: "./common.yaml#/components/schemas/PasoFlujo" }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/CambioPasswordRequerido"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+
+    put:
+      tags: [Templates]
+      operationId: updateTemplate
+      summary: Guardar cambios en versión en borrador
+      description: |
+        Actualiza el diseño TipTap, las variables y el flujo de una versión en estado `BORRADOR`.
+        No permite modificar versiones que ya se encuentran en estado `ACTIVO` o `INACTIVO`.
+        `codUnidad` se fija al crear la plantilla y no se puede cambiar.
+        `audiencia` se puede cambiar solo mientras la plantilla **nunca se ha publicado** (su única versión es la 1, en
+        `BORRADOR`): si se omite, se conserva. En una plantilla que ya tuvo una versión publicada la audiencia es la de
+        sus solicitudes y versiones anteriores, y enviarla responde `409` (`CONFLICTO_ESTADO`).
+        `idFlujo`: si se omite, la versión conserva su flujo actual; si se envía `null`, se lo quita.
+        El flujo debe ser `ACTIVO` o un `BORRADOR` sin dueño (o ya propio de esta versión) de la misma unidad:
+        `404` si no existe, `400` si es de otra unidad y `409` si es un borrador de otra versión.
+        Se valida que cada variable usada en `cuerpoDocumento` esté definida en `variableFormJson`
+        (y viceversa), que los `id` sean únicos, que un `select` tenga opciones y que `min` no sea mayor que `max`.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idVersion, variableFormJson, disenoFormJson]
+              properties:
+                idVersion:        { type: integer, example: 12 }
+                nombre:           { type: string, minLength: 1, maxLength: 200, example: "Solicitud de Retiro de Asignatura (Revisada)" }
+                descripcion:      { type: string, nullable: true, example: "Descripción actualizada" }
+                audiencia:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { $ref: "./common.yaml#/components/schemas/Estamento" }
+                  description: Solo en una plantilla que nunca se ha publicado; si se omite, se conserva
+                  example: ["ESTUDIANTE", "PROFESOR"]
+                idFlujo:          { type: integer, nullable: true, example: 1 }
+                variableFormJson: { $ref: "./common.yaml#/components/schemas/VariableFormJson" }
+                disenoFormJson:   { $ref: "./common.yaml#/components/schemas/DisenoFormJson" }
+      responses:
+        "200":
+          description: Versión borrador actualizada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla: { type: integer, example: 5 }
+                  idVersion:   { type: integer, example: 12 }
+                  mensaje:     { type: string, example: "Cambios guardados en borrador con éxito." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+    delete:
+      tags: [Templates]
+      operationId: deleteTemplate
+      summary: Eliminar una plantilla que nunca se ha publicado
+      description: |
+        Elimina por completo una plantilla cuya única versión es la 1 en `BORRADOR` (nunca se publicó, así que no tiene
+        solicitudes). Se borran la plantilla, esa versión y el flujo en `BORRADOR` del que la versión era dueña; los
+        flujos `ACTIVO` que usaba no se tocan. La acción no se puede deshacer.
+        Una plantilla que ya tuvo una versión publicada no se elimina (`409`, `CONFLICTO_ESTADO`): sus versiones
+        tienen solicitudes e historial. Para retirarla del catálogo está `POST /api/templates/{id}/deactivate`.
+        Una plantilla de otra unidad responde `404`.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador de la plantilla
+      responses:
+        "204":
+          description: Plantilla eliminada
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/templates/{id}/versions:
+    post:
+      tags: [Templates]
+      operationId: createTemplateVersion
+      summary: Crear nueva versión para edición (Clonado seguro)
+      description: |
+        Clona la versión activa actual hacia una nueva fila con estado `BORRADOR` y
+        `numeroVersion = max + 1`. Esto garantiza que la versión en producción continúe
+        operando sin interrupciones mientras el administrador edita los cambios.
+        Si la plantilla fue desactivada y no tiene versión `ACTIVO`, se clona la de mayor `numeroVersion`, de modo
+        que una plantilla desactivada se puede volver a editar y publicar.
+        Responde `409` si la plantilla ya tiene una versión en `BORRADOR` (se edita esa). En ese caso, `detalles` trae
+        `{ campo: "idVersion", mensaje: "<idVersion del borrador>" }` para que el cliente lo abra.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador de la plantilla
+      responses:
+        "201":
+          description: Nueva versión borrador clonada exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idPlantilla:   { type: integer, example: 5 }
+                  idVersion:     { type: integer, example: 14 }
+                  numeroVersion: { type: integer, example: 2 }
+                  estado:        { type: string, example: "BORRADOR" }
+                  mensaje:       { type: string, example: "Nueva versión 2 creada para edición." }
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/templates/{id}/publish:
+    post:
+      tags: [Templates]
+      operationId: publishTemplate
+      summary: Publicar versión a producción
+      description: |
+        Activa de forma atómica la versión indicada (`estado = ACTIVO`, `fecha_public = now()`)
+        y pasa a estado `INACTIVO` cualquier versión previamente activa de la plantilla.
+
+        **Requisito:** la versión debe tener un flujo de aprobación con al menos un paso. Sin flujo no se
+        puede publicar (responde `409`), de modo que ninguna versión `ACTIVO` queda sin cadena de aprobación
+        ni aparece en el catálogo de los solicitantes.
+
+        **Flujo:** si el flujo está en `BORRADOR`, pasa a `ACTIVO` y queda reutilizable. Antes de publicar se
+        vuelven a comprobar las reglas del flujo contra los titulares de hoy: cada paso debe tener un titular con
+        cuenta activa y rol `APROBADOR` (`409` `APROBADOR_INVALIDO`) y ninguna persona puede estar en dos pasos
+        (`409` `CONFLICTO_ESTADO`).
+
+        **Documentos en proceso:** las solicitudes `PENDIENTE` conservan la versión y el flujo con los que fueron
+        radicadas; publicar una versión nueva nunca las migra, aunque el flujo nuevo parezca una ampliación del
+        anterior, y tampoco migra las de una versión desactivada. Las solicitudes `APROBADO` y `RECHAZADO` nunca
+        se modifican. Solo las solicitudes radicadas después de la publicación usan la versión nueva.
+
+        **Validaciones del documento** (`400 VALIDACION_FALLIDA`, un elemento de `detalles` por falla):
+        - `cuerpoDocumento` tiene al menos un texto o una variable.
+        - Cada nodo `variable` del cuerpo es una variable automática o está definido en `variableFormJson`, y
+          cada variable de `variableFormJson` aparece en el cuerpo.
+        - Hay a lo sumo un `signatureBlock`, y hay exactamente uno si algún paso del flujo tiene `reqFirma`.
+        - Si el flujo tiene un paso `ESCUELA_SOLICITANTE`, la `audiencia` es solo `ESTUDIANTE` (solo ellos tienen carrera
+          y escuela). Además, cada escuela con carreras debe tener un titular de ese cargo que pueda aprobar
+          (`409` `APROBADOR_INVALIDO`).
+        - Las reglas de `VariableFormJson` (ids únicos, `select` con opciones, `min` ≤ `max`, choque con `{id}Otro`).
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idVersion]
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión en borrador a publicar
+                  example: 14
+      responses:
+        "200":
+          description: Versión publicada y disponible para los solicitantes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idPlantilla, idVersion, numeroVersion, estado, mensaje]
+                properties:
+                  idPlantilla:   { type: integer, example: 5 }
+                  idVersion:     { type: integer, example: 14 }
+                  numeroVersion: { type: integer, example: 2 }
+                  estado:        { type: string, example: "ACTIVO" }
+                  mensaje:       { type: string, example: "La versión 2 ha sido publicada exitosamente." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+  /api/templates/{id}/deactivate:
+    post:
+      tags: [Templates]
+      operationId: deactivateTemplate
+      summary: Desactivar la versión publicada (retirar el trámite)
+      description: |
+        Pasa la versión `ACTIVO` a `INACTIVO`: la plantilla deja de aparecer en el catálogo y no admite solicitudes
+        nuevas (`POST /api/requests` responde `409`). Las solicitudes que ya están en proceso **no se tocan**:
+        conservan su versión y su flujo, y terminan normalmente. El flujo no cambia y sigue reutilizable.
+
+        Para volver a ofrecer el trámite se crea una versión nueva con `POST /api/templates/{id}/versions` (clona la
+        última) y se publica. Responde `409` si la versión no está `ACTIVO`.
+      x-roles: [ADMINISTRADOR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Identificador de la plantilla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idVersion]
+              properties:
+                idVersion:
+                  type: integer
+                  description: Identificador de la versión `ACTIVO` a desactivar
+                  example: 14
+      responses:
+        "200":
+          description: Versión desactivada
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idPlantilla, idVersion, numeroVersion, estado, mensaje]
+                properties:
+                  idPlantilla:   { type: integer, example: 5 }
+                  idVersion:     { type: integer, example: 14 }
+                  numeroVersion: { type: integer, example: 2 }
+                  estado:        { type: string, example: "INACTIVO" }
+                  mensaje:       { type: string, example: "La versión 2 fue desactivada. Las solicitudes en proceso continúan." }
+        "400":
+          $ref: "./common.yaml#/components/responses/ValidacionFallida"
+        "401":
+          $ref: "./common.yaml#/components/responses/NoAutenticado"
+        "403":
+          $ref: "./common.yaml#/components/responses/SinPermiso"
+        "404":
+          $ref: "./common.yaml#/components/responses/NoEncontrado"
+        "409":
+          $ref: "./common.yaml#/components/responses/Conflicto"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

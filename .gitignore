@@ -1,0 +1,15 @@
+# Dependencias de Node
+node_modules/
+
+# Variables de entorno y scripts con credenciales
+ecosystem.config.js
+.env
+*.env
+database/scripts/userd_db.sql
+
+# Logs y procesos de PM2
+*.log
+logs/*.pid
+
+# Build del frontend
+client/dist/

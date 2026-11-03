@@ -1,0 +1,327 @@
+/* Estilos del editor que no se imprimen; la hoja usa ESTILOS_DOCUMENTO del motor. */
+
+/* Fondo del lienzo; la separación entre hojas usa el mismo color */
+.doc-editor-lienzo {
+  --doc-lienzo: #e2e8f0;
+  background: var(--doc-lienzo);
+}
+
+.doc-hoja-editor {
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.12), 0 8px 24px rgb(15 23 42 / 0.08);
+}
+
+.doc-hoja-editor .ProseMirror {
+  outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  /* Contiene los márgenes de sus bloques: el alto medido coincide con el del documento */
+  display: flow-root;
+}
+
+/* ---------- Corte entre hojas (decoración de la extensión Paginacion) ---------- */
+.doc-editor-corte {
+  display: flow-root; /* sus márgenes internos no se mezclan con los bloques vecinos */
+  user-select: none;
+  pointer-events: none;
+}
+.doc-editor-corte-margen-inferior { height: 20mm; }
+.doc-editor-corte-margen-superior { height: 25mm; }
+/* Franja del color del lienzo que separa una hoja de la siguiente (cubre también la sombra lateral) */
+.doc-editor-corte-separacion {
+  height: 10mm;
+  margin: 0 -24mm;
+  background: var(--doc-lienzo, #e2e8f0);
+}
+
+/* Texto guía del documento vacío */
+.doc-hoja-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+/* Salto de página manual: no ocupa alto */
+.doc-hoja-editor .ProseMirror .doc-salto-pagina { position: relative; }
+.doc-hoja-editor .ProseMirror .doc-salto-pagina::after {
+  content: 'Salto de página';
+  position: absolute;
+  top: 2px;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed #94a3b8;
+  padding-top: 1px;
+  color: #64748b;
+  font: 600 7pt Arial, sans-serif;
+  text-align: center;
+}
+
+/* Cápsulas de variable */
+.doc-capsula-variable {
+  display: inline-block;
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 4px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.92em;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: grab;
+  text-indent: 0;
+}
+.doc-capsula-sistema {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+  color: #075985;
+}
+/* Variable usada sin definición */
+.doc-capsula-indefinida {
+  border-color: #fda4af;
+  border-style: dashed;
+  background: #fff1f2;
+  color: #9f1239;
+}
+.doc-capsula-variable.ProseMirror-selectednode {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 1px;
+}
+
+/* Marcador del bloque de firmas */
+.doc-firmas-editor {
+  margin: 0 0 10px;
+  padding: 12mm 4mm 6mm;
+  border: 1px dashed #94a3b8;
+  border-radius: 4px;
+  color: #64748b;
+  font-family: Arial, 'Liberation Sans', Helvetica, sans-serif;
+  font-size: 9pt;
+  font-style: italic;
+  text-align: center;
+  user-select: none;
+}
+/* Bloque de firmas dibujado por el motor: se puede seleccionar y arrastrar */
+.doc-firmas-en-editor {
+  cursor: grab;
+  user-select: none;
+  border-radius: 4px;
+}
+.doc-hoja-editable .doc-firmas-en-editor:hover {
+  outline: 1px dashed #94a3b8;
+  outline-offset: 2px;
+}
+.doc-firmas-editor.ProseMirror-selectednode,
+.doc-firmas-en-editor.ProseMirror-selectednode,
+.doc-salto-pagina.ProseMirror-selectednode {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* Membrete y copias del pie en los cortes: se ven pero no se seleccionan */
+.doc-hoja-editor .doc-encabezado,
+.doc-hoja-editor .doc-editor-corte .doc-pie {
+  user-select: none;
+}
+
+/* ---------- Pie de página editable ---------- */
+/* El pie se edita en la última hoja; los demás son copias */
+.doc-hoja-editable .doc-editor-corte .doc-pie {
+  pointer-events: auto;
+  cursor: text;
+}
+.doc-hoja-editable .doc-pie-editable:hover,
+.doc-hoja-editable .doc-editor-corte .doc-pie:hover {
+  outline: 1px dashed #f59e0b;
+  outline-offset: 2mm;
+}
+.doc-hoja-editable .doc-pie-editable:focus-within {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2mm;
+}
+.doc-pie-editable .ProseMirror {
+  outline: none;
+  display: flow-root;
+  white-space: pre-wrap;
+}
+.doc-pie-editable .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  width: 100%;
+  height: 0;
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+/* ---------- Tablas en el editor ---------- */
+/* El margen de la tabla va en .tableWrapper para medir igual que en el documento */
+.doc-hoja-editor .tableWrapper {
+  display: flow-root;
+  margin: 0 0 10px;
+}
+.doc-hoja-editor .tableWrapper > table {
+  margin: 0;
+}
+.doc-hoja-editor .ProseMirror td,
+.doc-hoja-editor .ProseMirror th {
+  position: relative;
+}
+/* Celdas seleccionadas (arrastrando sobre varias celdas) */
+.doc-hoja-editor .ProseMirror .selectedCell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgb(37 99 235 / 0.12);
+  pointer-events: none;
+}
+
+/* Membrete editable */
+.doc-membrete-editable {
+  position: relative;
+}
+.doc-membrete-linea {
+  outline: none;
+  border-radius: 2px;
+  min-height: 1.3em;
+  cursor: text;
+  white-space: pre-wrap;
+}
+.doc-membrete-linea:hover {
+  box-shadow: 0 0 0 1px #c7d2fe;
+}
+.doc-membrete-linea:focus {
+  box-shadow: 0 0 0 2px #93c5fd;
+  background: #f8fafc;
+}
+.doc-membrete-linea:empty::before {
+  content: attr(data-placeholder);
+  color: #94a3b8;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.doc-membrete-logo {
+  position: relative;
+}
+.doc-membrete-logo-boton {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.doc-membrete-logo-boton:hover,
+.doc-membrete-logo-boton:focus-visible {
+  outline: 1px dashed #6366f1;
+  outline-offset: 1mm;
+}
+.doc-membrete-logo-vacio {
+  width: 40%;
+  height: 40%;
+  color: #cbd5e1;
+}
+.doc-membrete-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 46mm;
+  padding: 4px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 25px -5px rgb(15 23 42 / 0.15);
+  font: 400 9pt Arial, sans-serif;
+  text-align: left;
+  list-style: none;
+  margin: 0;
+}
+.doc-membrete-menu-izq {
+  left: 0;
+}
+.doc-membrete-menu-der {
+  right: 0;
+}
+.doc-membrete-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #1e293b;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.doc-membrete-menu button:hover,
+.doc-membrete-menu button:focus-visible {
+  background: #f1f5f9;
+  outline: none;
+}
+.doc-membrete-menu-check {
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  color: #2563eb;
+}
+.doc-membrete-menu-check svg {
+  width: 12px;
+  height: 12px;
+}
+/* «Agregar línea» flota sobre el margen inferior: no cambia el alto del membrete */
+.doc-membrete-agregar {
+  position: absolute;
+  left: 50%;
+  bottom: -3mm;
+  transform: translate(-50%, 50%);
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid #c7d2fe;
+  border-radius: 999px;
+  background: #fff;
+  color: #3730a3;
+  font: 600 8pt Arial, sans-serif;
+  cursor: pointer;
+}
+.doc-membrete-agregar svg {
+  width: 10px;
+  height: 10px;
+}
+.doc-membrete-editable:hover .doc-membrete-agregar,
+.doc-membrete-editable:focus-within .doc-membrete-agregar {
+  display: inline-flex;
+}
+/* «Quitar» flota sobre el margen superior del membrete */
+.doc-membrete-quitar {
+  position: absolute;
+  right: 0;
+  top: 0;
+  transform: translateY(-110%);
+  display: none;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border: 1px solid #fecdd3;
+  border-radius: 999px;
+  background: #fff;
+  color: #be123c;
+  font: 600 8pt Arial, sans-serif;
+  cursor: pointer;
+}
+.doc-membrete-quitar svg {
+  width: 10px;
+  height: 10px;
+}
+.doc-membrete-editable:hover .doc-membrete-quitar,
+.doc-membrete-editable:focus-within .doc-membrete-quitar {
+  display: inline-flex;
+}
